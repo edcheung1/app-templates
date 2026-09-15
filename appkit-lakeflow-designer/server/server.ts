@@ -1,0 +1,1028 @@
+import { createApp, createWorkspaceClient, server } from '@databricks/appkit';
+
+// Each published app's manifest is written by the publish flow to a per-app workspace path and read
+// at startup via the app's own workspace client. It is keyed by the runner job id: a per-app value
+// guaranteed present via the bound `job` resource (DATABRICKS_APP_NAME is not reliably injected). It
+// lives outside the git-backed source (shared across all published apps) and outside client/dist, so
+// it is never served publicly.
+const MANIFEST_ROOT = process.env.DESIGNER_MANIFEST_ROOT ?? '/Workspace/Shared/designer-apps';
+const MANIFEST_VERSION = 3;
+const TARGET_NODE_PARAM = 'target_node';
+const NO_OUTPUT_REASON = "The run finished but returned no output. The notebook did not call dbutils.notebook.exit().";
+const NO_OUTPUTS_REASON = "The run finished but returned a payload with no outputs. The notebook was published with nothing to return.";
+const MISSING_OUTPUT_REASON = "This output is published with the app, but the run did not return it. That happens when the run predates the output being added, or when the app and its runner have drifted apart.";
+
+// SKIPPED and INTERNAL_ERROR are terminal even when no task ran.
+const TERMINAL_LIFE_CYCLE_STATES = new Set(['TERMINATED', 'SKIPPED', 'INTERNAL_ERROR']);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const isReadableError = (value: unknown): value is { type: string; message: string } =>
+  isRecord(value) && typeof value.type === 'string' && typeof value.message === 'string';
+const isSchemaField = (value: unknown): value is { name: string; type: string } =>
+  isRecord(value) && typeof value.name === 'string' && typeof value.type === 'string';
+
+const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+type AppParameter = {
+  name: string;
+  label: string;
+  type: 'text' | 'number' | 'dropdown';
+  defaultValue: string;
+  choices?: string[];
+  help?: string;
+};
+type AppBlock =
+  | { type: 'markdown'; id?: string; text: string }
+  | { type: 'output'; id: string; label: string; nodeId: string; port: string; chartSpec?: Record<string, unknown> };
+type AppManifest = {
+  version: number;
+  appName: string;
+  subtitle?: string;
+  provenance?: Record<string, unknown>;
+  target?: { nodeId: string; label: string };
+  blocks: AppBlock[];
+  parameters: AppParameter[];
+};
+type OutputBlock = Extract<AppBlock, { type: 'output' }>;
+type ClassifiedEntry =
+  | { outcome: 'malformed'; index: number; id: string | undefined; reason: string }
+  | { outcome: 'computeError' | 'result'; index: number; id: string | undefined; payload: Record<string, unknown> };
+type RunSummary = {
+  jobRunId: string;
+  taskRunId?: string;
+  endTime?: number;
+  startTime?: number;
+  setupDurationMs?: number;
+  executionDurationMs?: number;
+  runPageUrl?: string;
+  resultState?: string;
+  lifeCycleState?: string;
+  parameters?: Record<string, string>;
+};
+
+const JOB_ID = (() => {
+  const raw = process.env.DATABRICKS_JOB_ID;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return undefined;
+  }
+  return raw.trim();
+})();
+
+let workspaceClient: ReturnType<typeof createWorkspaceClient> | undefined;
+const wsClient = () => {
+  workspaceClient ??= createWorkspaceClient();
+  return workspaceClient;
+};
+
+const READ_RETRY_ATTEMPTS = 3;
+const READ_RETRY_BACKOFF_MS = 1000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Retry Jobs reads only; replaying runNow or cancelRun is unsafe.
+async function retryRead<T>(read: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await read();
+    } catch (err) {
+      lastError = err;
+
+      if (attempt < READ_RETRY_ATTEMPTS) {
+        await sleep(READ_RETRY_BACKOFF_MS);
+      }
+    }
+  }
+  throw lastError;
+}
+
+let manifestPromise: Promise<AppManifest | undefined> | undefined;
+const loadManifest = async () => {
+  manifestPromise ??= readManifest();
+  const manifest = await manifestPromise;
+  // A failed or absent read resolves to undefined; drop the memo so a later request retries the
+  // read rather than being pinned to "unconfigured" for the life of the process.
+  if (manifest === undefined) {
+    manifestPromise = undefined;
+  }
+  return manifest;
+};
+
+async function readManifest() {
+  if (JOB_ID === undefined) {
+    return undefined;
+  }
+  const manifestPath = `${MANIFEST_ROOT}/${JOB_ID}/designerApp.json`;
+  try {
+    // The AppKit facade exposes no workspace service, so reach it through the legacy client; export
+    // returns base64 content.
+    const exported = await wsClient().toLegacyWorkspaceClient().workspace.export({ path: manifestPath, format: 'SOURCE' });
+    if (typeof exported.content !== 'string') {
+      return undefined;
+    }
+    return parseManifest(Buffer.from(exported.content, 'base64').toString('utf8'));
+  } catch (err) {
+    console.error('Could not read the app manifest from', manifestPath, err);
+    return undefined;
+  }
+}
+
+function toProvenance(raw: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(raw) || typeof raw.publishedAt !== 'number' || !Number.isFinite(raw.publishedAt) || raw.publishedAt <= 0) {
+    return undefined;
+  }
+  return { ...raw, publishedAt: raw.publishedAt };
+}
+
+function parseManifest(raw: unknown): AppManifest | undefined {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed) || parsed.version !== MANIFEST_VERSION) {
+    return undefined;
+  }
+  if (typeof parsed.appName !== 'string' || parsed.appName === '') {
+    return undefined;
+  }
+  const target =
+    isRecord(parsed.target) && typeof parsed.target.nodeId === 'string' && parsed.target.nodeId !== ''
+      ? { nodeId: parsed.target.nodeId, label: typeof parsed.target.label === 'string' ? parsed.target.label : '' }
+      : undefined;
+  const provenance = toProvenance(parsed.provenance);
+  const blocks = parseBlocks(parsed.blocks);
+  if (!blocks.some((block) => block.type === 'output')) {
+    return undefined;
+  }
+  if (!Array.isArray(parsed.parameters)) {
+    return undefined;
+  }
+  const parameters: AppParameter[] = parsed.parameters.filter(isRecord).flatMap((entry): AppParameter[] => {
+    if (typeof entry.name !== 'string' || entry.name === '' || entry.name === TARGET_NODE_PARAM) {
+      return [];
+    }
+    if (typeof entry.label !== 'string') {
+      return [];
+    }
+    const declared: AppParameter['type'] =
+      entry.type === 'number' ? 'number' : entry.type === 'dropdown' ? 'dropdown' : 'text';
+    const choices =
+      Array.isArray(entry.choices) && entry.choices.length > 0 && entry.choices.every((choice) => typeof choice === 'string')
+        ? (entry.choices as string[])
+        : undefined;
+    const type: AppParameter['type'] = declared === 'dropdown' && choices === undefined ? 'text' : declared;
+    return [
+      {
+        name: entry.name,
+        label: entry.label,
+        type,
+        defaultValue: typeof entry.defaultValue === 'string' ? entry.defaultValue : '',
+        ...(type === 'dropdown' && choices !== undefined ? { choices } : {}),
+        ...(typeof entry.help === 'string' && entry.help !== '' ? { help: entry.help } : {}),
+      },
+    ];
+  });
+  return {
+    version: MANIFEST_VERSION,
+    appName: parsed.appName,
+    ...(typeof parsed.subtitle === 'string' && parsed.subtitle !== '' ? { subtitle: parsed.subtitle } : {}),
+    // Carry provenance as one opaque object across the server projection.
+    ...(provenance === undefined ? {} : { provenance }),
+    ...(target === undefined ? {} : { target }),
+    blocks,
+    parameters,
+  };
+}
+
+function parseBlocks(raw: unknown): AppBlock[] {
+  const seen = new Set();
+  const blocks: AppBlock[] = [];
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    if (isRecord(entry) && entry.type === 'markdown' && typeof entry.text === 'string') {
+      blocks.push({
+        type: 'markdown',
+        ...(typeof entry.id === 'string' && entry.id !== '' ? { id: entry.id } : {}),
+        text: entry.text,
+      });
+      continue;
+    }
+    if (
+      !isRecord(entry) ||
+      entry.type !== 'output' ||
+      typeof entry.id !== 'string' ||
+      entry.id === '' ||
+      seen.has(entry.id)
+    ) {
+      continue;
+    }
+    seen.add(entry.id);
+
+    const chartSpec =
+      isRecord(entry.chartSpec) && typeof entry.chartSpec.widgetType === 'string' && entry.chartSpec.widgetType !== ''
+        ? { ...entry.chartSpec }
+        : undefined;
+    blocks.push({
+      type: 'output',
+      id: entry.id,
+      label: typeof entry.label === 'string' ? entry.label : '',
+      nodeId: typeof entry.nodeId === 'string' ? entry.nodeId : '',
+      port: typeof entry.port === 'string' ? entry.port : '',
+      ...(chartSpec === undefined ? {} : { chartSpec }),
+    });
+  }
+  return blocks;
+}
+
+function resolveRunParameters(
+  manifest: AppManifest,
+  submitted: Record<string, unknown>,
+): { ok: true; params: Record<string, string> } | { ok: false; error: string } {
+  const params: Record<string, string> = {};
+  for (const parameter of manifest.parameters) {
+    if (parameter.name === TARGET_NODE_PARAM) {
+      continue;
+    }
+    const raw = submitted[parameter.name];
+    const value = raw === undefined || raw === null ? '' : String(raw);
+    const resolved = value.trim() === '' ? parameter.defaultValue : value;
+    if (parameter.type === 'dropdown' && Array.isArray(parameter.choices) && !parameter.choices.includes(resolved)) {
+      return { ok: false, error: `"${parameter.label}" must be one of the offered choices.` };
+    }
+    params[parameter.name] = resolved;
+  }
+  return { ok: true, params };
+}
+
+function classifyOutputEntry(entry: unknown, index: number): ClassifiedEntry {
+  if (!isRecord(entry)) {
+    return { outcome: 'malformed', index, id: undefined, reason: 'This output is not an object.' };
+  }
+  const id = typeof entry.id === 'string' && entry.id !== '' ? entry.id : undefined;
+  if (entry.status === 'error') {
+    if (!isReadableError(entry.error)) {
+      return { outcome: 'malformed', index, id, reason: 'This output reported an error, but the error was not readable.' };
+    }
+    return { outcome: 'computeError', index, id, payload: entry };
+  }
+  if (entry.status !== 'ok') {
+    return {
+      outcome: 'malformed',
+      index,
+      id,
+      reason: `This output has an unrecognised status: ${JSON.stringify(entry.status)}`,
+    };
+  }
+  if (!Array.isArray(entry.schema) || !Array.isArray(entry.rows)) {
+    return { outcome: 'malformed', index, id, reason: 'This output reported success but is missing the schema or rows.' };
+  }
+  if (!entry.schema.every(isSchemaField) || !entry.rows.every(isRecord)) {
+    return { outcome: 'malformed', index, id, reason: 'This output reported success but its schema or rows are malformed.' };
+  }
+  const fieldNames = entry.schema.map((field) => field.name);
+  // Rows are keyed by column name downstream, so blank or duplicate names silently collapse
+  // columns; reject the output rather than render data that has lost or merged a column.
+  if (fieldNames.some((name) => name === '') || new Set(fieldNames).size !== fieldNames.length) {
+    return { outcome: 'malformed', index, id, reason: 'This output reported success but its columns have blank or duplicate names.' };
+  }
+  return { outcome: 'result', index, id, payload: entry };
+}
+
+function classifyMultiRunOutput(
+  raw: string | undefined,
+): { outcome: 'noPayload'; reason: string } | { outcome: 'outputs'; outputs: ClassifiedEntry[] } {
+  if (raw === undefined || raw.trim() === '') {
+    return { outcome: 'noPayload', reason: NO_OUTPUT_REASON };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { outcome: 'noPayload', reason: `The run returned output that is not valid JSON: ${errText(err)}` };
+  }
+  if (!isRecord(parsed) || Object.keys(parsed).length === 0) {
+    return { outcome: 'noPayload', reason: 'The run returned an empty output object.' };
+  }
+  if (!Array.isArray(parsed.outputs)) {
+    return {
+      outcome: 'noPayload',
+      reason: 'The run returned output with no outputs list, so it is not a multi-output payload.',
+    };
+  }
+  if (parsed.outputs.length === 0) {
+    return { outcome: 'noPayload', reason: NO_OUTPUTS_REASON };
+  }
+  // Classify entries independently so one malformed output does not discard valid siblings.
+  return { outcome: 'outputs', outputs: parsed.outputs.map((entry, index) => classifyOutputEntry(entry, index)) };
+}
+
+const outputStringField = (payload: Record<string, unknown>, field: string): string | undefined =>
+  typeof payload[field] === 'string' && payload[field] !== '' ? (payload[field] as string) : undefined;
+
+const joinSource = (node: string | undefined, port: string | undefined): string | undefined =>
+  node === undefined ? undefined : port === undefined ? node : `${node}.${port}`;
+
+type MatchOutcome =
+  | { outcome: 'malformed'; reason: string }
+  | { outcome: 'computeError' | 'result'; payload: Record<string, unknown> }
+  | { outcome: 'missing'; reason: string };
+type OutputSection = {
+  key: string;
+  id?: string;
+  title: string;
+  source?: string;
+  chartSpec?: Record<string, unknown>;
+  undeclared: boolean;
+  outcome: MatchOutcome;
+};
+
+function matchedOutcome(entry: ClassifiedEntry): MatchOutcome {
+  return entry.outcome === 'malformed'
+    ? { outcome: 'malformed', reason: entry.reason }
+    : { outcome: entry.outcome, payload: entry.payload };
+}
+
+function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
+  const multi = classifyMultiRunOutput(raw);
+  if (multi.outcome !== 'outputs') {
+    return { outcome: 'noPayload', reason: multi.reason };
+  }
+  const classified = multi.outputs;
+  const consumed = new Set<number>();
+  // A node that has a published output block exposes only the port(s) the author selected. Its other
+  // ports still arrive in the run payload (the runner displays every port of a displayed node), but
+  // they are deliberate omissions, not undeclared discoveries, so they must not render as extra
+  // sections. A node with no published block at all is still surfaced as undeclared below.
+  const declaredNodes = new Set(declared.map((output) => output.nodeId).filter((nodeId) => nodeId !== ''));
+
+  const outputs: OutputSection[] = declared.map((output) => {
+    // Each payload entry is keyed by the (node, port) from the cell's display(ctx[...]) line rather
+    // than an output id, so bind the manifest output by that.
+    const declaredNode = output.nodeId === '' ? undefined : output.nodeId;
+    const declaredPort = output.port === '' ? undefined : output.port;
+    // Well-formed entries bind by (node, port); outputStringField normalizes '' to undefined, so
+    // coerce declared empties the same way (else an empty port compares undefined === '' and never
+    // binds). A malformed entry carries no (node, port), so bind it to its declared block by id: the
+    // block then surfaces the malformed outcome instead of reporting missing and re-appending it as
+    // undeclared.
+    const matches = (entry: ClassifiedEntry) =>
+      entry.outcome === 'malformed'
+        ? entry.id !== undefined && entry.id === output.id
+        : outputStringField(entry.payload, 'target_node') === declaredNode &&
+          outputStringField(entry.payload, 'target_port') === declaredPort;
+    // Prefer an unconsumed entry so distinct blocks each take their own; fall back to any match so
+    // two blocks published at the same (node, port) both render it rather than the second being
+    // reported missing.
+    const found = classified.find((entry) => !consumed.has(entry.index) && matches(entry)) ?? classified.find(matches);
+    const source = joinSource(declaredNode, declaredPort);
+    const section = {
+      key: `declared:${output.id}`,
+      id: output.id,
+      title: output.label !== '' ? output.label : output.nodeId !== '' ? output.nodeId : output.id,
+      ...(source === undefined ? {} : { source }),
+
+      ...(output.chartSpec === undefined ? {} : { chartSpec: output.chartSpec }),
+      undeclared: false,
+    };
+    if (found === undefined) {
+      return {
+        ...section,
+        outcome: {
+          outcome: 'missing',
+          reason: MISSING_OUTPUT_REASON,
+        },
+      };
+    }
+    consumed.add(found.index);
+    return { ...section, outcome: matchedOutcome(found) };
+  });
+
+  for (const entry of classified) {
+    if (consumed.has(entry.index)) {
+      continue;
+    }
+    const node = entry.outcome === 'malformed' ? undefined : outputStringField(entry.payload, 'target_node');
+    // Drop a sibling port of a node the author did publish: its selected port already matched a
+    // declared block above, and its other ports are intentional omissions rather than undeclared output.
+    if (node !== undefined && declaredNodes.has(node)) {
+      continue;
+    }
+    const source =
+      entry.outcome === 'malformed' ? undefined : joinSource(node, outputStringField(entry.payload, 'target_port'));
+    outputs.push({
+      key: `payload:${entry.index}`,
+      ...(entry.id === undefined ? {} : { id: entry.id }),
+      title: entry.id ?? node ?? `Output ${entry.index + 1}`,
+      ...(source === undefined ? {} : { source }),
+      undeclared: true,
+      outcome: matchedOutcome(entry),
+    });
+  }
+
+  return { outcome: 'outputs', outputs };
+}
+
+async function declaredOutputs() {
+  return (await loadManifest())?.blocks.filter((block): block is OutputBlock => block.type === 'output') ?? [];
+}
+
+// --- Run output from the exported notebook model (JS mirror of exportedRunOutput.ts) ---
+const RUNNER_PAYLOAD_VERSION = 2;
+const NOTEBOOK_MODEL_ASSIGNMENT = /__DATABRICKS_NOTEBOOK_MODEL = '([^']*)'/;
+// Each cell's display(ctx["<node>.<port>"]) lines name the ports it renders, in source order.
+const DISPLAY_CTX_KEY = /display\(ctx\["([^"]+)"\]\)/g;
+
+function findNotebookModelValue(exportedHtml: unknown): string | undefined {
+  if (typeof exportedHtml !== 'string') {
+    return undefined;
+  }
+  const direct = exportedHtml.match(NOTEBOOK_MODEL_ASSIGNMENT);
+  if (direct !== null) {
+    return direct[1];
+  }
+  try {
+    const nested = Buffer.from(exportedHtml, 'base64').toString().match(NOTEBOOK_MODEL_ASSIGNMENT);
+    return nested !== null ? nested[1] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function decodeNotebookModel(exportedHtml: unknown): Record<string, unknown> | undefined {
+  const value = findNotebookModelValue(exportedHtml);
+  if (value === undefined) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(decodeURIComponent(Buffer.from(value, 'base64').toString()));
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function displayedCtxKeys(source: unknown): string[] {
+  if (typeof source !== 'string') {
+    return [];
+  }
+  return Array.from(source.matchAll(DISPLAY_CTX_KEY), (match) => match[1]);
+}
+
+// Node names carry no dots, so the last dot separates node and port.
+function splitCtxKey(key: string): { node: string; port: string } {
+  const dot = key.lastIndexOf('.');
+  return dot === -1 ? { node: key, port: '' } : { node: key.slice(0, dot), port: key.slice(dot + 1) };
+}
+
+function simpleType(rawType: unknown): string {
+  if (typeof rawType !== 'string') {
+    return 'string';
+  }
+  try {
+    const parsed = JSON.parse(rawType);
+    return typeof parsed === 'string' ? parsed : rawType;
+  } catch {
+    return rawType;
+  }
+}
+
+function toDisplayTable(entry: unknown) {
+  if (!isRecord(entry) || entry.type !== 'table' || !Array.isArray(entry.schema) || !Array.isArray(entry.data)) {
+    return undefined;
+  }
+  const schema = entry.schema.filter(isRecord).map((field) => ({
+    name: typeof field.name === 'string' ? field.name : '',
+    type: simpleType(field.type),
+    nullable: typeof field.nullable === 'boolean' ? field.nullable : true,
+  }));
+  const columnNames = schema.map((field) => field.name);
+  const rows = entry.data
+    .filter((row) => Array.isArray(row))
+    .map((row) => Object.fromEntries(columnNames.map((name, index) => [name, row[index] ?? null])));
+  return { schema, rows };
+}
+
+function resultEntries(results: unknown): unknown[] {
+  return isRecord(results) && Array.isArray(results.data) ? results.data : [];
+}
+
+// A cell that displayed has one result entry per display() call, in order, so pairing those with the
+// cell's display(ctx["<node>.<port>"]) keys yields one output entry per rendered port, keyed by
+// (node, port). A cell that did not display contributes no entries and no outputs.
+function exportedModelToRunPayload(exportedHtml: unknown): string | undefined {
+  const model = decodeNotebookModel(exportedHtml);
+  if (model === undefined || !Array.isArray(model.commands)) {
+    return undefined;
+  }
+  const outputs: Record<string, unknown>[] = [];
+  for (const command of model.commands) {
+    if (!isRecord(command)) {
+      continue;
+    }
+    const keys = displayedCtxKeys(command.command);
+    resultEntries(command.results).forEach((entry, index) => {
+      const key = keys[index];
+      const table = toDisplayTable(entry);
+      if (key === undefined || table === undefined) {
+        return;
+      }
+      const parts = splitCtxKey(key);
+      outputs.push({
+        status: 'ok',
+        target_node: parts.node,
+        target_port: parts.port,
+        schema: table.schema,
+        rows: table.rows,
+      });
+    });
+  }
+  return JSON.stringify({ version: RUNNER_PAYLOAD_VERSION, outputs });
+}
+
+// runs/export returns the run's rendered notebook views; the CODE view carries the displayed
+// command results. exportRun mirrors the SDK jobs surface the other jobs.* reads use.
+async function readRunOutputPayload(taskRunId: string): Promise<string | undefined> {
+  const exported = await retryRead(() =>
+    wsClient().jobs.exportRun({ run_id: Number(taskRunId), views_to_export: 'CODE' }),
+  );
+  const views = isRecord(exported) && Array.isArray(exported.views) ? exported.views : [];
+  // Select by the decoder's own probe, not a raw substring: the CODE view's content can be
+  // base64-wrapped, and base64 never contains the literal marker, so a substring test would skip
+  // an encoded view and drop a real result.
+  const view = views.find((candidate) => isRecord(candidate) && findNotebookModelValue(candidate.content) !== undefined);
+  return isRecord(view) ? exportedModelToRunPayload(view.content) : undefined;
+}
+
+const positiveIntFrom = (value: unknown) => {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+// Run and job IDs are int64: keep them as positive decimal strings so a value past 2^53-1 is
+// not corrupted by Number. The appkit Jobs API still takes run_id as a number, so ids are cast
+// at that call boundary only; everything the client sees stays full precision.
+const idFrom = (value: unknown) => {
+  if (value === null || value === undefined || typeof value === 'boolean') {
+    return undefined;
+  }
+  const text = String(value);
+  return /^[1-9][0-9]*$/.test(text) ? text : undefined;
+};
+
+// Page completed runs until the newest success is in hand: a streak of recent failures must not
+// hide an older successful run. Bound the scan so an all-failed history can't page forever.
+const LAST_RUN_PAGE_SIZE = 25;
+const LAST_RUN_SCAN_CAP = 200;
+const ACTIVE_RUN_SCAN_LIMIT = 5;
+const SUCCESSFUL_RESULT_STATES = new Set(['SUCCESS', 'SUCCESS_WITH_FAILURES']);
+
+function isSuccessfulRun(run: unknown): run is Record<string, unknown> {
+  return (
+    isRecord(run) &&
+    idFrom(run.run_id) !== undefined &&
+    isRecord(run.state) &&
+    typeof run.state.result_state === 'string' &&
+    SUCCESSFUL_RESULT_STATES.has(run.state.result_state)
+  );
+}
+
+function selectLastSuccessfulRun(runs: unknown) {
+  if (!Array.isArray(runs)) {
+    return undefined;
+  }
+  const successes = runs.filter(isSuccessfulRun);
+  successes.sort((a, b) => (positiveIntFrom(b.start_time) ?? 0) - (positiveIntFrom(a.start_time) ?? 0));
+  return successes[0];
+}
+
+function selectActiveRun(runs: unknown) {
+  if (!Array.isArray(runs)) {
+    return undefined;
+  }
+  const active = runs.filter((run) => isRecord(run) && idFrom(run.run_id) !== undefined);
+  active.sort((a, b) => (positiveIntFrom(b.start_time) ?? 0) - (positiveIntFrom(a.start_time) ?? 0));
+  return active[0];
+}
+
+function lifeCycleStateOf(run: Record<string, unknown>) {
+  const state = run.state;
+  return isRecord(state) && typeof state.life_cycle_state === 'string' && state.life_cycle_state !== ''
+    ? state.life_cycle_state
+    : undefined;
+}
+
+function summarizeLastRun(run: Record<string, unknown>): RunSummary | undefined {
+  const jobRunId = idFrom(run.run_id);
+  if (jobRunId === undefined) {
+    return undefined;
+  }
+  const firstTask = (Array.isArray(run.tasks) ? run.tasks : []).find(isRecord);
+  const summary: RunSummary = { jobRunId };
+  const taskRunId = firstTask === undefined ? undefined : idFrom(firstTask.run_id);
+  if (taskRunId !== undefined) summary.taskRunId = taskRunId;
+  const endTime = positiveIntFrom(run.end_time);
+  if (endTime !== undefined) summary.endTime = endTime;
+  const startTime = positiveIntFrom(run.start_time);
+  if (startTime !== undefined) summary.startTime = startTime;
+  const setupDurationMs = positiveIntFrom(run.setup_duration);
+  if (setupDurationMs !== undefined) summary.setupDurationMs = setupDurationMs;
+  const executionDurationMs = positiveIntFrom(run.execution_duration);
+  if (executionDurationMs !== undefined) summary.executionDurationMs = executionDurationMs;
+  if (typeof run.run_page_url === 'string' && run.run_page_url !== '') summary.runPageUrl = run.run_page_url;
+  return summary;
+}
+
+function lastRunParameters(run: Record<string, unknown>): Record<string, string> | undefined {
+  const overriding = run.overriding_parameters;
+  if (!isRecord(overriding) || !isRecord(overriding.notebook_params)) {
+    return undefined;
+  }
+  const params: Record<string, string> = {};
+  for (const [name, value] of Object.entries(overriding.notebook_params)) {
+    if (name === TARGET_NODE_PARAM || typeof value !== 'string') {
+      continue;
+    }
+    params[name] = value;
+  }
+  return params;
+}
+
+// Guard every client- or list-supplied run ID before reading output or cancelling it.
+function runBelongsToJob(run: unknown, jobId: string | undefined) {
+  if (jobId === undefined || !isRecord(run)) {
+    return false;
+  }
+  return String(run.job_id) === jobId;
+}
+
+const RUN_HISTORY_DEFAULT_WINDOW = 100;
+const RUN_HISTORY_MAX_WINDOW = 200;
+const RUN_HISTORY_PAGE_SIZE = 25;
+
+function resultStateOf(run: Record<string, unknown>) {
+  const state = run.state;
+  return isRecord(state) && typeof state.result_state === 'string' && state.result_state !== ''
+    ? state.result_state
+    : undefined;
+}
+
+function summarizeHistoryRun(run: Record<string, unknown>) {
+  const summary = summarizeLastRun(run);
+  if (summary === undefined) {
+    return undefined;
+  }
+  delete summary.taskRunId;
+  const resultState = resultStateOf(run);
+  if (resultState !== undefined) summary.resultState = resultState;
+  const lifeCycleState = lifeCycleStateOf(run);
+  if (lifeCycleState !== undefined) summary.lifeCycleState = lifeCycleState;
+  const parameters = lastRunParameters(run);
+  if (parameters !== undefined) summary.parameters = parameters;
+  return summary;
+}
+
+const historyStartedAt = (run: Record<string, unknown>) => positiveIntFrom(run.start_time) ?? 0;
+
+function summarizeRunHistory(runs: unknown, windowSize: number) {
+  if (!Array.isArray(runs)) {
+    return { entries: [], hasMore: false };
+  }
+  const records = runs.filter(isRecord);
+  const hasMore = runs.length > windowSize;
+  records.sort((a, b) => historyStartedAt(b) - historyStartedAt(a));
+  const entries: RunSummary[] = [];
+  for (const record of records) {
+    if (entries.length >= windowSize) {
+      break;
+    }
+    const entry = summarizeHistoryRun(record);
+    if (entry !== undefined) {
+      entries.push(entry);
+    }
+  }
+  return { entries, hasMore };
+}
+
+function resolveHistoryWindow(raw: unknown) {
+  const parsed = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    return RUN_HISTORY_DEFAULT_WINDOW;
+  }
+  return Math.min(parsed, RUN_HISTORY_MAX_WINDOW);
+}
+
+createApp({
+
+  plugins: [server()],
+  onPluginsReady: async (appkit) => {
+    appkit.server.extend((app) => {
+
+      app.get('/api/designer/config', async (_req, res) => {
+        try {
+          const manifest = await loadManifest();
+          if (manifest === undefined) {
+            res.json({ manifest: null, runnable: false, notRunnableReason: 'noManifest' });
+            return;
+          }
+          if (JOB_ID === undefined) {
+            res.json({ manifest, runnable: false, notRunnableReason: 'noJob' });
+            return;
+          }
+          res.json({ manifest, runnable: true });
+        } catch (err) {
+          console.error(err);
+          res.status(500).json({ error: 'The app could not read its own configuration.' });
+        }
+      });
+
+      app.get('/api/designer/last-run', async (_req, res) => {
+        if (JOB_ID === undefined) {
+          res.json({ status: 'noJob' });
+          return;
+        }
+
+        let listed = [];
+        try {
+
+          listed = await retryRead(async () => {
+            const collected = [];
+
+            // completed_only includes failures. Keep paging until the newest success is in hand so
+            // a run of recent failures doesn't hide an older success, bounded by LAST_RUN_SCAN_CAP.
+            for await (const run of wsClient().jobs.listRuns({
+              job_id: Number(JOB_ID),
+              completed_only: true,
+              expand_tasks: true,
+              limit: LAST_RUN_PAGE_SIZE,
+            })) {
+              collected.push(run);
+
+              if (isSuccessfulRun(run) || collected.length >= LAST_RUN_SCAN_CAP) {
+                break;
+              }
+            }
+            return collected;
+          });
+        } catch (err) {
+          console.error(err);
+          res.json({ status: 'unavailable', reason: `Could not read this app's run history: ${errText(err)}` });
+          return;
+        }
+
+        let active;
+        try {
+
+          // Trust active_only instead of duplicating Jobs lifecycle-state logic.
+          const activeRuns = [];
+          // DELIBERATELY NOT WRAPPED in retryRead; this best-effort signal must not delay primary content.
+          for await (const candidate of wsClient().jobs.listRuns({
+            job_id: Number(JOB_ID),
+            active_only: true,
+            expand_tasks: true,
+            limit: ACTIVE_RUN_SCAN_LIMIT,
+          })) {
+            activeRuns.push(candidate);
+            if (activeRuns.length >= ACTIVE_RUN_SCAN_LIMIT) {
+              break;
+            }
+          }
+          const activeRun = selectActiveRun(activeRuns);
+          const activeSummary = activeRun === undefined ? undefined : summarizeLastRun(activeRun);
+          if (activeRun !== undefined && activeSummary !== undefined) {
+            const activeParameters = lastRunParameters(activeRun);
+            active = {
+              run: activeSummary,
+              ...(activeParameters === undefined ? {} : { parameters: activeParameters }),
+
+              ...(lifeCycleStateOf(activeRun) === undefined ? {} : { lifeCycleState: lifeCycleStateOf(activeRun) }),
+            };
+          }
+        } catch (err) {
+          console.error(err);
+        }
+
+        const run = selectLastSuccessfulRun(listed);
+        const summary = run === undefined ? undefined : summarizeLastRun(run);
+        if (run === undefined || summary === undefined) {
+
+          res.json({ status: 'none', ...(active === undefined ? {} : { active }) });
+          return;
+        }
+
+        const parameters = lastRunParameters(run);
+
+        const found = {
+          status: 'found',
+          run: summary,
+          ...(parameters === undefined ? {} : { parameters }),
+          ...(active === undefined ? {} : { active }),
+        };
+
+        if (summary.taskRunId === undefined) {
+          res.json({
+            ...found,
+            result: { outcome: 'noPayload', reason: 'The run reported no task, so it has no output to read.' },
+          });
+          return;
+        }
+
+        try {
+          // Jobs requires the task run ID here, not the job run ID.
+          const payload = await readRunOutputPayload(summary.taskRunId);
+          res.json({ ...found, result: matchRunOutputs(await declaredOutputs(), payload) });
+        } catch (err) {
+
+          res.json({
+            ...found,
+            result: { outcome: 'noPayload', reason: `Could not read the run output: ${errText(err)}` },
+          });
+        }
+      });
+
+      app.post('/api/designer/run', async (req, res) => {
+        try {
+          const manifest = await loadManifest();
+          if (manifest === undefined) {
+            res.status(409).json({ error: 'This app has no published configuration, so it cannot run.' });
+            return;
+          }
+          if (JOB_ID === undefined) {
+            res.status(409).json({ error: 'This app is not connected to a job yet, so it cannot run.' });
+            return;
+          }
+          const submitted = isRecord(req.body) && isRecord(req.body.params) ? req.body.params : {};
+          const resolved = resolveRunParameters(manifest, submitted);
+          if (!resolved.ok) {
+            res.status(400).json({ error: resolved.error });
+            return;
+          }
+
+          // Writes MUST NEVER BE retried; replaying runNow can start duplicate compute.
+          const run = await wsClient().jobs.runNow({ job_id: Number(JOB_ID), notebook_params: resolved.params });
+          const jobRunId = idFrom(run?.run_id);
+          if (jobRunId === undefined) {
+            res.status(502).json({ error: 'The platform accepted the request but returned no run id.' });
+            return;
+          }
+          res.json({ jobRunId });
+        } catch (err) {
+          console.error(err);
+          res.status(502).json({ error: `Could not start the run: ${errText(err)}` });
+        }
+      });
+
+      app.get('/api/designer/run/:jobRunId', async (req, res) => {
+        const jobRunId = idFrom(req.params.jobRunId);
+        if (jobRunId === undefined) {
+          res.status(400).json({ error: 'jobRunId must be a positive integer.' });
+          return;
+        }
+
+        let run;
+        try {
+          run = await retryRead(() => wsClient().jobs.getRun({ run_id: Number(jobRunId) }));
+        } catch (err) {
+          res.status(502).json({ error: `Could not read run ${jobRunId}: ${errText(err)}` });
+          return;
+        }
+
+        if (!runBelongsToJob(run, JOB_ID)) {
+          res.status(404).json({ error: `Run ${jobRunId} is not a run of this app.` });
+          return;
+        }
+
+        const lifeCycleState = run.state?.life_cycle_state;
+        const resultState = run.state?.result_state;
+        // A run carrying a result_state has finished even if its lifecycle value is absent or one
+        // this list does not know yet, so treat that as terminal rather than polling it forever.
+        const terminal =
+          (lifeCycleState != null && TERMINAL_LIFE_CYCLE_STATES.has(lifeCycleState)) ||
+          resultState != null;
+        const snapshot = {
+          jobRunId,
+          taskRunId: idFrom(run.tasks?.[0]?.run_id),
+          lifeCycleState,
+          resultState,
+          stateMessage: run.state?.state_message,
+          setupDurationMs: run.setup_duration,
+          executionDurationMs: run.execution_duration,
+          runPageUrl: run.run_page_url,
+          terminal,
+        };
+
+        if (!terminal) {
+          res.json(snapshot);
+          return;
+        }
+
+        if (resultState === undefined || !SUCCESSFUL_RESULT_STATES.has(resultState)) {
+          res.json({
+            ...snapshot,
+            result: {
+              outcome: 'noPayload',
+              reason:
+                run.state?.state_message?.trim() ||
+                `The run ended in state ${resultState ?? 'UNKNOWN'} without producing output.`,
+            },
+          });
+          return;
+        }
+
+        if (snapshot.taskRunId === undefined) {
+          res.json({
+            ...snapshot,
+            result: { outcome: 'noPayload', reason: 'The run reported no task, so it has no output to read.' },
+          });
+          return;
+        }
+
+        try {
+          // Jobs requires the task run ID here, not the job run ID.
+          const payload = await readRunOutputPayload(snapshot.taskRunId);
+          res.json({ ...snapshot, result: matchRunOutputs(await declaredOutputs(), payload) });
+        } catch (err) {
+          res.json({
+            ...snapshot,
+            result: { outcome: 'noPayload', reason: `Could not read the run output: ${errText(err)}` },
+          });
+        }
+      });
+
+      app.delete('/api/designer/run/:jobRunId', async (req, res) => {
+        const jobRunId = idFrom(req.params.jobRunId);
+        if (jobRunId === undefined) {
+          res.status(400).json({ error: 'jobRunId must be a positive integer.' });
+          return;
+        }
+
+        let run;
+        try {
+          run = await retryRead(() => wsClient().jobs.getRun({ run_id: Number(jobRunId) }));
+        } catch (err) {
+          res.status(502).json({ error: `Could not read run ${jobRunId}: ${errText(err)}` });
+          return;
+        }
+        if (!runBelongsToJob(run, JOB_ID)) {
+          res.status(404).json({ error: `Run ${jobRunId} is not a run of this app.` });
+          return;
+        }
+
+        try {
+
+          // Never retry writes; polling settles cancellation from the run's own state.
+          await wsClient().jobs.cancelRun({ run_id: Number(jobRunId) });
+          res.json({ cancelled: true });
+        } catch (err) {
+          console.error(err);
+          res.status(502).json({ error: `Could not cancel run ${jobRunId}: ${errText(err)}` });
+        }
+      });
+
+      app.get('/api/designer/runs', async (req, res) => {
+        if (JOB_ID === undefined) {
+          res.json({ status: 'noJob' });
+          return;
+        }
+        const windowSize = resolveHistoryWindow(req.query?.window);
+
+        let history = [];
+        try {
+
+          history = await retryRead(async () => {
+            const collected = [];
+            // listRuns caps page size at 26; stop the generator once the requested window is full.
+            for await (const run of wsClient().jobs.listRuns({
+              job_id: Number(JOB_ID),
+              completed_only: true,
+              limit: RUN_HISTORY_PAGE_SIZE,
+            })) {
+              collected.push(run);
+
+              if (collected.length > windowSize) {
+                break;
+              }
+            }
+            return collected;
+          });
+        } catch (err) {
+          console.error(err);
+          res.json({ status: 'unavailable', reason: `Could not read this app's run history: ${errText(err)}` });
+          return;
+        }
+
+        const page = summarizeRunHistory(history, windowSize);
+
+        res.json({ status: 'found', runs: page.entries, hasMore: page.hasMore, window: windowSize });
+      });
+    });
+  },
+}).catch((err) => {
+
+  console.error(err);
+  process.exit(1);
+});

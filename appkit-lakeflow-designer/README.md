@@ -16,15 +16,19 @@ Per-app differences are injected at deploy time rather than baked into the sourc
 
 ## Layout
 
-- `build/server.js` — the Node/AppKit server. Authored JS committed as source (not a build artifact),
-  run directly by `start`.
+- `server/server.ts` — the Node/AppKit server (TypeScript). Type-checked and bundled by
+  `build:server` (`tsc -b` + `tsdown`) to `dist/server.js`, which `start` runs.
 - `client/` — the React client, built by Vite to `client/dist`.
-- `app.yaml` — start command and env bindings.
-- `package.json` — `build` (client typecheck + `vite build`) and `start` (`node build/server.js`);
-  dependencies include `@databricks/appkit` for the server.
+- `app.yaml` — start command and env bindings (`command: ['npm', 'run', 'start']`).
+- `tsconfig.shared.json` / `tsconfig.server.json` / `tsconfig.client.json` — a strict shared base
+  with a server (Node) and a client (DOM) project, referenced by the root `tsconfig.json`.
+- `package.json` — `build` (`build:server` then `build:client`) and `start`
+  (`node ./dist/server.js`). Everything the server needs at build and run time is under
+  `dependencies` (Databricks Apps skips `devDependencies` when `NODE_ENV=production`).
 
 ## Local build
 
     npm install
-    npm run build   # typecheck client + vite build -> client/dist
-    npm start       # node build/server.js
+    npm run build   # build:server (tsc -b + tsdown -> dist/server.js) + build:client (vite -> client/dist)
+    npm run typecheck
+    npm start       # node ./dist/server.js
