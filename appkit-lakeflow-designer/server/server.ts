@@ -97,16 +97,24 @@ async function retryRead<T>(read: () => Promise<T>): Promise<T> {
   throw lastError;
 }
 
-let manifestPromise: Promise<AppManifest | undefined> | undefined;
-const loadManifest = async () => {
-  manifestPromise ??= readManifest();
-  const manifest = await manifestPromise;
-  // A failed or absent read resolves to undefined; drop the memo so a later request retries the
-  // read rather than being pinned to "unconfigured" for the life of the process.
-  if (manifest === undefined) {
-    manifestPromise = undefined;
+// The manifest changes only on republish (rare), so the frequently-polled run-status endpoints
+// reuse a cached read (declaredOutputs, forceFresh omitted). The page-load (/config) and run-submit
+// (POST /run) paths pass forceFresh, so a republish is reflected on the next load without a redeploy
+// and refreshes the cache the status endpoints read.
+let cachedManifest: AppManifest | undefined;
+let hasCachedManifest = false;
+const loadManifest = async (forceFresh = false): Promise<AppManifest | undefined> => {
+  if (!forceFresh && hasCachedManifest) {
+    return cachedManifest;
   }
-  return manifest;
+  const manifest = await readManifest();
+  if (manifest !== undefined) {
+    cachedManifest = manifest;
+    hasCachedManifest = true;
+  }
+  // A fresh read that failed falls back to the last good manifest, so a transient export blip does
+  // not flip a configured app to "unconfigured".
+  return manifest ?? (hasCachedManifest ? cachedManifest : undefined);
 };
 
 async function readManifest() {
@@ -724,7 +732,7 @@ createApp({
 
       app.get('/api/designer/config', async (_req, res) => {
         try {
-          const manifest = await loadManifest();
+          const manifest = await loadManifest(true);
           if (manifest === undefined) {
             res.json({ manifest: null, runnable: false, notRunnableReason: 'noManifest' });
             return;
@@ -846,7 +854,7 @@ createApp({
 
       app.post('/api/designer/run', async (req, res) => {
         try {
-          const manifest = await loadManifest();
+          const manifest = await loadManifest(true);
           if (manifest === undefined) {
             res.status(409).json({ error: 'This app has no published configuration, so it cannot run.' });
             return;
