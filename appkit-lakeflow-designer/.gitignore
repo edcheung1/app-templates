@@ -1,0 +1,5 @@
+node_modules/
+client/dist/
+.env
+.DS_Store
+# Note: build/ is NOT ignored. build/server.js is authored source, not a build artifact.
