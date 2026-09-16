@@ -5,5 +5,3 @@ env:
     valueFrom: job
   - name: DISABLE_REMOTE_SERVING
     value: 'true'
-  - name: NODE_ENV
-    value: 'production'
