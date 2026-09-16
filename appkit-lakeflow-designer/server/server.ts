@@ -1,11 +1,12 @@
 import { createApp, createWorkspaceClient, server } from '@databricks/appkit';
 
-// Each published app's manifest is written by the publish flow to a per-app workspace path and read
-// at startup via the app's own workspace client. It is keyed by the runner job id: a per-app value
-// guaranteed present via the bound `job` resource (DATABRICKS_APP_NAME is not reliably injected). It
-// lives outside the git-backed source (shared across all published apps) and outside client/dist, so
-// it is never served publicly.
-const MANIFEST_ROOT = process.env.DESIGNER_MANIFEST_ROOT ?? '/Workspace/Shared/designer-apps';
+// Each published app's manifest is written by the publish flow beside the runner notebook, in the
+// app's own publisher-owned folder (not a shared, world-writable root), and read at startup via the
+// app's own workspace client. The app locates that folder by reading its bound runner job's notebook
+// path (the `job` resource is guaranteed present, and the app can read it via its CAN_MANAGE_RUN
+// grant), then looks for the manifest file there. It lives outside the git-backed source and outside
+// client/dist, so it is never served publicly.
+const MANIFEST_FILENAME = 'designerApp.json';
 const MANIFEST_VERSION = 3;
 const TARGET_NODE_PARAM = 'target_node';
 const NO_OUTPUT_REASON = "The run finished but returned no output. The notebook did not call dbutils.notebook.exit().";
@@ -117,11 +118,48 @@ const loadManifest = async (forceFresh = false): Promise<AppManifest | undefined
   return manifest ?? (hasCachedManifest ? cachedManifest : undefined);
 };
 
-async function readManifest() {
+function manifestFolderFromNotebookPath(notebookPath: string): string {
+  const lastSlash = notebookPath.lastIndexOf('/');
+  return lastSlash <= 0 ? notebookPath : notebookPath.slice(0, lastSlash);
+}
+
+// The manifest folder is the directory holding the runner notebook. The runner job's notebook path is
+// stable for the app's lifetime, so resolve it once from the bound job and cache it, rather than
+// reading the job on every manifest read.
+let cachedManifestFolder: string | undefined;
+let hasResolvedManifestFolder = false;
+
+async function resolveManifestFolder(): Promise<string | undefined> {
+  if (hasResolvedManifestFolder) {
+    return cachedManifestFolder;
+  }
   if (JOB_ID === undefined) {
     return undefined;
   }
-  const manifestPath = `${MANIFEST_ROOT}/${JOB_ID}/designerApp.json`;
+  try {
+    const job = await wsClient().jobs.get({ job_id: Number(JOB_ID) });
+    const notebookPath = job.settings?.tasks
+      ?.map((task) => task.notebook_task?.notebook_path)
+      .find((path): path is string => typeof path === 'string' && path !== '');
+    if (notebookPath === undefined) {
+      console.error('Could not find the runner notebook path on job', JOB_ID, 'to locate the app manifest');
+      return undefined;
+    }
+    cachedManifestFolder = manifestFolderFromNotebookPath(notebookPath);
+    hasResolvedManifestFolder = true;
+    return cachedManifestFolder;
+  } catch (err) {
+    console.error('Could not read the runner job to locate the app manifest', err);
+    return undefined;
+  }
+}
+
+async function readManifest() {
+  const folder = await resolveManifestFolder();
+  if (folder === undefined) {
+    return undefined;
+  }
+  const manifestPath = `${folder}/${MANIFEST_FILENAME}`;
   try {
     // The AppKit facade exposes no workspace service, so reach it through the legacy client; export
     // returns base64 content.
