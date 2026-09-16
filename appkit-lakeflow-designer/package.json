@@ -12,8 +12,8 @@
     "typecheck": "tsc -b tsconfig.server.json && tsc -b tsconfig.client.json"
   },
   "dependencies": {
-    "@databricks/appkit": "0.65.0",
-    "@databricks/appkit-ui": "0.65.0",
+    "@databricks/appkit": "0.70.0",
+    "@databricks/appkit-ui": "0.70.0",
     "@databricks/sdk-experimental": "0.17.0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
