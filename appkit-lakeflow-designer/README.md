@@ -34,6 +34,24 @@ Per-app differences are injected at deploy time rather than baked into the sourc
     npm run dev    # client-only development; API requests still require the AppKit server
     npm start       # node ./dist/server.js
 
+## Result previews
+
+The app reads each run's exported notebook display results and sends at most 1,000 rows per output
+to the client. Tables and charts use this same bounded preview. The notebook's `overflow` flag is
+preserved; it can indicate a row or byte limit, so the app does not label it as sampling or guess
+which limit was reached. Missing overflow metadata means completeness is unknown, not complete.
+
+The footer shows `1,000 / 1,500 rows` when a complete export supplies an exact total, or `1,000 rows shown`
+with a **Truncated** badge when the notebook overflowed without a known total. Complete small
+results simply show their row count. Charts warn when they use a truncated result.
+
+A complete export capped only by the app can use its original length as the exact total.
+When the notebook export itself overflowed, the total is unknown. The generated runner and its
+operator cells are unchanged; no additional counting queries or result cells are added.
+
+The app does not trigger a new count query or rerun the job when loading results. Full-data
+downloads are not implemented by the preview path.
+
 ## Chart rendering
 
 Published bar, line, area, and pie charts use Vega-Lite/Vega, the same chart engine family as

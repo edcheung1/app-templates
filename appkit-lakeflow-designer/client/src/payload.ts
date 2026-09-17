@@ -1,4 +1,4 @@
-
+import { DISPLAY_ROW_LIMIT, summarizeResultPreview, type ResultPreview } from '../../shared/resultPreview';
 import type { AppChartSpec } from './appConfig';
 
 export type SchemaField = {
@@ -10,15 +10,6 @@ export type SchemaField = {
 
 export type ResultRow = Record<string, unknown>;
 
-export type Truncation = {
-  by_byte_budget: boolean;
-  by_row_limit: boolean;
-
-  schema_omitted?: boolean;
-  row_limit: number;
-  byte_budget: number;
-};
-
 export type RunMetrics = {
   collect_ms?: number;
   serialize_ms?: number;
@@ -26,13 +17,12 @@ export type RunMetrics = {
   total_ms?: number;
 };
 
-export type OkPayload = {
+export type OkPayload = ResultPreview & {
   status: 'ok';
   target_node: string;
   target_port: string;
   schema: SchemaField[];
   rows: ResultRow[];
-  truncated: Truncation;
   metrics: RunMetrics;
 };
 
@@ -117,21 +107,6 @@ function parseSchemaField(raw: unknown): SchemaField | undefined {
   return { name: raw.name, type: raw.type, nullable: typeof raw.nullable === 'boolean' ? raw.nullable : true };
 }
 
-// Absent or malformed truncation metadata means nothing was truncated, mirroring parseMetrics'
-// leniency: a successful payload that omits it is valid and must still render its schema and rows.
-function parseTruncation(raw: unknown): Truncation {
-  if (!isRecord(raw) || typeof raw.by_byte_budget !== 'boolean' || typeof raw.by_row_limit !== 'boolean') {
-    return { by_byte_budget: false, by_row_limit: false, row_limit: 0, byte_budget: 0 };
-  }
-  return {
-    by_byte_budget: raw.by_byte_budget,
-    by_row_limit: raw.by_row_limit,
-    row_limit: typeof raw.row_limit === 'number' ? raw.row_limit : 0,
-    byte_budget: typeof raw.byte_budget === 'number' ? raw.byte_budget : 0,
-    ...(typeof raw.schema_omitted === 'boolean' ? { schema_omitted: raw.schema_omitted } : {}),
-  };
-}
-
 function parseMetrics(raw: unknown): RunMetrics {
   if (!isRecord(raw)) {
     return {};
@@ -160,8 +135,8 @@ function parseOkPayload(raw: Record<string, unknown>): OkPayload | undefined {
     target_node: raw.target_node,
     target_port: raw.target_port,
     schema: schema as SchemaField[],
-    rows: raw.rows as ResultRow[],
-    truncated: parseTruncation(raw.truncated),
+    rows: raw.rows.slice(0, DISPLAY_ROW_LIMIT),
+    ...summarizeResultPreview(raw.rows.length, raw.truncated, raw.total_row_count),
     metrics: parseMetrics(raw.metrics),
   };
 }

@@ -4,35 +4,21 @@ import type { OkPayload } from './payload';
 const formatCount = (n: number) => n.toLocaleString();
 
 export function ResultFooter({ payload }: { payload: OkPayload }) {
-  const { rows, truncated, metrics } = payload;
-  const schemaOmitted = truncated?.schema_omitted === true;
-  const byBytes = truncated?.by_byte_budget === true;
-  const byRows = truncated?.by_row_limit === true;
+  const { rows, truncated, total_row_count, metrics } = payload;
+  const rowCountLabel =
+    truncated === true && total_row_count !== undefined
+      ? `${formatCount(rows.length)} / ${formatCount(total_row_count)} rows`
+      : `${formatCount(rows.length)} rows${truncated === false ? '' : ' shown'}`;
 
   return (
     <div className="border-border flex flex-wrap items-center gap-x-3 gap-y-2 border-t px-3 py-1.5 text-xs">
-      <span className="text-muted-foreground tabular-nums">{formatCount(rows.length)} rows</span>
+      <span className="text-muted-foreground tabular-nums">{rowCountLabel}</span>
 
-      {schemaOmitted || byBytes ? (
-        <Badge variant="destructive" className="font-normal">
-          {schemaOmitted ? 'Output did not fit' : 'Result too large'}
-        </Badge>
-      ) : null}
-      {!schemaOmitted && !byBytes && byRows ? (
+      {truncated === true ? (
         <Badge variant="secondary" className="font-normal">
-          Based on sample data
+          Truncated
         </Badge>
       ) : null}
-
-      <span className="text-muted-foreground">
-        {schemaOmitted
-          ? `The ${formatCount(truncated.byte_budget)}-byte payload budget was already spent by the outputs before this one, so none of it was returned: not the rows and not the column list. This is not an empty result. Narrow the earlier outputs or raise the budget.`
-          : byBytes
-            ? `Serialization stopped at the ${formatCount(truncated.byte_budget)}-byte payload budget, so rows are missing from the end. Narrow the result or raise the budget.`
-            : byRows
-              ? `Showing the first ${formatCount(truncated.row_limit)} rows. There may be more upstream.`
-              : 'Complete result.'}
-      </span>
 
       <span className="text-muted-foreground ml-auto flex items-center gap-3">
         {metrics?.collect_ms != null ? <span className="tabular-nums">collect {metrics.collect_ms} ms</span> : null}

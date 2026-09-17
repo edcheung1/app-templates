@@ -44,7 +44,7 @@ import { RunStatus } from './RunStatus';
 import { ThemeToggle } from './ThemeToggle';
 import { useDesignerRun } from './useDesignerRun';
 import { useFollowedRun } from './useFollowedRun';
-import type { MatchedOutput, OkPayload, RunOutcome, RunSnapshot, Truncation } from './payload';
+import type { MatchedOutput, OkPayload, RunOutcome, RunSnapshot } from './payload';
 
 const EMPTY_LANDING_MESSAGES = {
   loading: 'Looking for the last run…',
@@ -967,10 +967,6 @@ function OutputSection({ output, onRetry }: { output: MatchedOutput; onRetry: ()
 }
 
 function ResultSection({ payload, chartSpec }: { payload: OkPayload; chartSpec?: AppChartSpec }) {
-
-  if (payload.truncated?.schema_omitted === true) {
-    return <ResultFooter payload={payload} />;
-  }
   if (payload.rows.length === 0) {
     return (
       <>
@@ -986,7 +982,7 @@ function ResultSection({ payload, chartSpec }: { payload: OkPayload; chartSpec?:
   if (chart !== undefined && chart.ok) {
     return (
       <>
-        <TruncatedChartWarning truncated={payload.truncated} />
+        <TruncatedChartWarning payload={payload} />
         <div className="px-6 py-4">
           <Suspense fallback={<p className="text-muted-foreground py-8 text-center text-sm">Loading chart…</p>}>
             <LazyOutputChart plan={chart.plan} rows={payload.rows} fallback={<ResultGrid payload={payload} />} />
@@ -1005,20 +1001,16 @@ function ResultSection({ payload, chartSpec }: { payload: OkPayload; chartSpec?:
   );
 }
 
-function TruncatedChartWarning({ truncated }: { truncated: Truncation }) {
-  const byBytes = truncated?.by_byte_budget === true;
-  const byRows = truncated?.by_row_limit === true;
-  if (!byBytes && !byRows) {
+function TruncatedChartWarning({ payload }: { payload: OkPayload }) {
+  if (payload.truncated !== true) {
     return null;
   }
   return (
     <div className="border-border border-t px-6 pt-4">
-      <Alert variant={byBytes ? 'destructive' : undefined}>
+      <Alert>
         <AlertTitle>This chart is drawn from part of the result</AlertTitle>
         <AlertDescription>
-          {byBytes
-            ? 'Serialization stopped at the payload byte budget, so rows are missing from the end and this chart plots only the rows that arrived. Its shape and its totals are not the whole result. The row count below is what was drawn.'
-            : `Only the first ${truncated.row_limit.toLocaleString()} rows reached this app, so this chart plots those rather than everything the operator produced. There may be categories, peaks and totals it does not show.`}
+          {`This chart uses only the ${payload.rows.length.toLocaleString()} rows shown in this preview. There may be categories, peaks and totals it does not show.`}
         </AlertDescription>
       </Alert>
     </div>
