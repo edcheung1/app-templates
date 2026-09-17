@@ -37,17 +37,32 @@ export interface PublishedChartPlan {
   yKey: string;
   orientation: 'vertical' | 'horizontal';
   xType: PublishedChartFieldType;
+  yType: PublishedChartFieldType;
+  xAxis: PublishedChartAxis;
+  yAxis: PublishedChartAxis;
   title?: string;
   lineShape: 'linear' | 'smooth' | 'step';
+  layout: 'layer' | 'group' | 'stack' | 'percent-stack';
+  innerRadius: number;
 
   dimension?: PublishedChartDomain;
-  // The long-format color channel is sorted before pivoting to AppKit's wide-format series.
   series?: PublishedChartDomain;
+  colorTitle?: string;
   xTitle: string;
   yTitle: string;
 
   // JSON rows carry temporal and quantitative values as strings; decode them before charting.
   coercions: PublishedChartCoercion[];
+}
+
+export interface PublishedChartAxis {
+  hide: boolean;
+  hideLabels: boolean;
+  hideGrid: boolean;
+  labelAngle?: number;
+  reverse: boolean;
+  domainMin?: number;
+  domainMax?: number;
 }
 
 export type PublishedChartRefusal =
@@ -96,6 +111,26 @@ function fieldTypeOf(sparkType: string): PublishedChartFieldType {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function axisOf(chartSpec: PublishedChartSpecInput, channel: string): PublishedChartAxis {
+  const encoding = isRecord(chartSpec.encodings) ? chartSpec.encodings[channel] : undefined;
+  const axis = isRecord(encoding) && isRecord(encoding.axis) ? encoding.axis : undefined;
+  const scale = isRecord(encoding) && isRecord(encoding.scale) ? encoding.scale : undefined;
+  const domain = isRecord(scale?.domain) ? scale.domain : undefined;
+  return {
+    hide: axis?.hide === true,
+    hideLabels: axis?.hideLabels === true,
+    hideGrid: axis?.hideGrid === true,
+    labelAngle: finiteNumber(axis?.labelAngle),
+    reverse: scale?.reverse === true,
+    domainMin: finiteNumber(domain?.min),
+    domainMax: finiteNumber(domain?.max),
+  };
+}
+
 interface Bound {
   field: string;
   type: PublishedChartFieldType;
@@ -118,23 +153,13 @@ function channelOf(
   }
 
   const displayName =
-    typeof encoding.displayName === 'string' && encoding.displayName !== ''
-      ? encoding.displayName
-      : undefined;
+    typeof encoding.displayName === 'string' && encoding.displayName !== '' ? encoding.displayName : undefined;
   const axis = isRecord(encoding.axis) ? encoding.axis : undefined;
   const title =
-    axis?.hideTitle === true
-      ? ''
-      : typeof axis?.title === 'string'
-        ? axis.title
-        : (displayName ?? encoding.fieldName);
+    axis?.hideTitle === true ? '' : typeof axis?.title === 'string' ? axis.title : (displayName ?? encoding.fieldName);
   const scale = isRecord(encoding.scale) ? encoding.scale.type : undefined;
   const type =
-    scale === 'categorical'
-      ? 'nominal'
-      : scale === 'quantitative' || scale === 'temporal'
-        ? scale
-        : undefined;
+    scale === 'categorical' ? 'nominal' : scale === 'quantitative' || scale === 'temporal' ? scale : undefined;
   return {
     fieldName: encoding.fieldName,
     title,
@@ -257,6 +282,9 @@ export function translatePublishedChart({
   const title = frame?.showTitle === true && typeof frame.title === 'string' ? frame.title : undefined;
   const mark = isRecord(chartSpec.mark) ? chartSpec.mark : undefined;
   const lineShape = mark?.lineShape === 'smooth' || mark?.lineShape === 'step' ? mark.lineShape : 'linear';
+  const xAxis = axisOf(chartSpec, 'x');
+  const yAxis = axisOf(chartSpec, 'y');
+  const innerRadius = Math.min(100, Math.max(0, finiteNumber(mark?.innerRadius) ?? 50));
   const cartesian = CARTESIAN.get(chartSpec.widgetType);
   if (cartesian !== undefined) {
     const x = bindChannel(chartSpec, 'x', schema);
@@ -286,19 +314,35 @@ export function translatePublishedChart({
     if (series && !series.ok) {
       return series;
     }
+    const sameColorAndDimension = color.ok && color.bound.field === (horizontal ? y.bound.field : x.bound.field);
+    const layout = sameColorAndDimension
+      ? 'layer'
+      : mark?.layout === 'stack' ||
+          mark?.layout === 'group' ||
+          mark?.layout === 'layer' ||
+          mark?.layout === 'percent-stack'
+        ? mark.layout
+        : cartesian === 'area' || (cartesian === 'bar' && color.ok)
+          ? 'stack'
+          : 'layer';
     return {
       ok: true,
       plan: {
         component: cartesian,
-        // AppKit always takes the dimension as xKey, including for horizontal bars.
-        xKey: horizontal ? y.bound.field : x.bound.field,
-        yKey: horizontal ? x.bound.field : y.bound.field,
+        xKey: x.bound.field,
+        yKey: y.bound.field,
         orientation: horizontal ? 'horizontal' : 'vertical',
         xType: x.bound.type,
+        yType: y.bound.type,
+        xAxis,
+        yAxis,
         title,
         lineShape,
+        layout,
+        innerRadius,
         dimension: dimension.domain,
         series: series?.domain,
+        colorTitle: color.ok ? color.bound.title : undefined,
         xTitle: x.bound.title,
         yTitle: y.bound.title,
         coercions: coercionsOf(x.bound, y.bound),
@@ -334,9 +378,15 @@ export function translatePublishedChart({
         yKey: angle.bound.field,
         orientation: 'vertical',
         xType: color.bound.type,
+        yType: angle.bound.type,
+        xAxis,
+        yAxis,
         title,
         lineShape,
+        layout: 'stack',
+        innerRadius,
         dimension: dimension.domain,
+        colorTitle: color.bound.title,
         xTitle: color.bound.title,
         yTitle: angle.bound.title,
         coercions: coercionsOf(angle.bound),

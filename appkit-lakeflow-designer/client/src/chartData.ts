@@ -1,129 +1,92 @@
 import { chartDomainKey, sortedChartDomain } from './chartSorting';
-import type {
-  PublishedChartCoercion,
-  PublishedChartDomain,
-  PublishedChartPlan,
-  PublishedChartRow,
-} from './chartTranslation';
+import type { PublishedChartDomain, PublishedChartPlan, PublishedChartRow } from './chartTranslation';
+
+type ChartValue = string | number | boolean | null;
+
+export interface PublishedChartDatum {
+  x: ChartValue;
+  y: ChartValue;
+  color: ChartValue;
+  order: number;
+  colorOrder: number;
+}
 
 export interface PublishedChartData {
-  data: PublishedChartRow[];
-  yKeys: string[];
-  // Colors follow Designer's default domain, even when an explicit sort reorders marks/legend.
+  data: PublishedChartDatum[];
+  dimensionValues?: ChartValue[];
+  colorValues: ChartValue[];
+  // Colors follow Designer's default domain even when an explicit sort reorders marks/legend.
   colorIndexes: number[];
 }
 
-function coerce(value: unknown, to: 'number' | 'date'): unknown {
-  if (value === null || value === undefined) {
-    return value;
-  }
-  if (to === 'number') {
-    // Number('') and Number('   ') are 0, so treat a blank string as missing rather than a real zero.
-    if (typeof value === 'string' && value.trim() === '') {
-      return null;
-    }
-    const asNumber = typeof value === 'number' ? value : Number(value);
-    return Number.isFinite(asNumber) ? asNumber : null;
-  }
-  const asDate = value instanceof Date ? value : new Date(value as string);
-  return Number.isNaN(asDate.getTime()) ? null : asDate;
+function chartValue(value: unknown): ChartValue {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  return value === null || value === undefined ? null : JSON.stringify(value);
 }
 
-// Decode dates and measures without rewriting category labels or mutating the result table.
-function coerceRows(
-  rows: readonly PublishedChartRow[],
-  coercions: readonly PublishedChartCoercion[],
-): PublishedChartRow[] {
-  return rows.map((row) => {
-    const next = { ...row };
-    for (const { field, to } of coercions) {
-      next[field] = coerce(next[field], to);
-    }
-    return next;
-  });
+function coerce(value: unknown, to: 'number' | 'date'): number | null {
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) {
+    return null;
+  }
+  const number =
+    to === 'number' ? Number(value) : new Date(value instanceof Date ? value.getTime() : String(value)).getTime();
+  return Number.isFinite(number) ? number : null;
 }
 
-// AppKit groups series by multiple yKeys (wide-format). Sum repeated category/series buckets.
-function pivotSeries(
-  rows: readonly PublishedChartRow[],
-  xKey: string,
-  series: PublishedChartDomain,
-  yKey: string,
-): PublishedChartRow[] {
-  const byX = new Map<unknown, PublishedChartRow>();
-  for (const row of rows) {
-    const seriesName = String(row[series.field]);
-    // The dimension and series share the wide row's key space.
-    if (seriesName === xKey) {
-      continue;
-    }
-    const xValue = row[xKey];
-    const groupKey = xValue instanceof Date ? xValue.getTime() : xValue;
-    let wide = byX.get(groupKey);
-    if (wide === undefined) {
-      wide = { [xKey]: xValue };
-      byX.set(groupKey, wide);
-    }
-    const measure = row[yKey];
-    const prior = wide[seriesName];
-    if (typeof measure === 'number') {
-      wide[seriesName] = typeof prior === 'number' ? prior + measure : measure;
-    } else if (prior === undefined) {
-      wide[seriesName] = measure;
-    }
-  }
-  return [...byX.values()];
+function domainRanks(values: readonly unknown[], domain: PublishedChartDomain): Map<unknown, number> {
+  return new Map(values.map((value, index) => [chartDomainKey(value, domain.valueType), index]));
 }
 
 export function preparePublishedChartData(
   plan: PublishedChartPlan,
   rows: readonly PublishedChartRow[],
 ): PublishedChartData {
-  const data = coerceRows(rows, plan.coercions);
-  let yKeys = [plan.yKey];
-  let colorValues: unknown[] = [];
-  let defaultRanks = new Map<unknown, number>();
+  const data = rows.map((row) => {
+    const next = { ...row };
+    for (const { field, to } of plan.coercions) next[field] = coerce(row[field], to);
+    return next;
+  });
+  const dimensionValues = plan.dimension ? sortedChartDomain(data, plan.dimension) : undefined;
+  const ranks = plan.dimension ? domainRanks(dimensionValues ?? [], plan.dimension) : undefined;
   const colorDomain = plan.component === 'pie' ? plan.dimension : plan.series;
-  if (colorDomain) {
-    const defaultValues = sortedChartDomain(data, {
-      ...colorDomain,
-      sort: plan.component === 'pie' ? { by: 'measure-reversed', field: plan.yKey } : { by: 'natural-order' },
-    });
-    defaultRanks = new Map(
-      defaultValues.map((value, index) => [chartDomainKey(value, colorDomain.valueType), index]),
-    );
-    if (plan.series) {
-      colorValues = sortedChartDomain(data, colorDomain).filter((value) => String(value) !== plan.xKey);
-      yKeys = colorValues.map(String);
-    }
-  }
-
-  if (plan.dimension) {
-    const domain = plan.dimension;
-    const ranks = new Map(
-      sortedChartDomain(data, domain).map((value, index) => [chartDomainKey(value, domain.valueType), index]),
-    );
-    const rank = (row: PublishedChartRow) =>
-      ranks.get(chartDomainKey(row[domain.field], domain.valueType)) ?? ranks.size;
-    data.sort((a, b) => rank(a) - rank(b));
-  } else {
-    const coordinate = (row: PublishedChartRow) => {
-      const value = row[plan.xKey];
-      return value instanceof Date ? value.getTime() : Number(value);
-    };
-    data.sort((a, b) => coordinate(a) - coordinate(b));
-  }
-
-  if (plan.component === 'pie') {
-    colorValues = data.map((row) => row[plan.xKey]);
-  }
-  const colorIndexes = colorDomain
-    ? colorValues.map((value) => defaultRanks.get(chartDomainKey(value, colorDomain.valueType)) ?? 0)
-    : [0];
+  const colorValues = colorDomain ? sortedChartDomain(data, colorDomain) : [];
+  const colorRanks = colorDomain ? domainRanks(colorValues, colorDomain) : undefined;
+  const defaultValues = colorDomain
+    ? sortedChartDomain(data, {
+        ...colorDomain,
+        sort: plan.component === 'pie' ? { by: 'measure-reversed', field: plan.yKey } : { by: 'natural-order' },
+      })
+    : [];
+  const defaultRanks = colorDomain ? domainRanks(defaultValues, colorDomain) : undefined;
 
   return {
-    data: plan.series ? pivotSeries(data, plan.xKey, plan.series, plan.yKey) : data,
-    yKeys,
-    colorIndexes,
+    // Fixed field names avoid Vega treating dots/brackets in SQL column names as nested paths.
+    // No wide-format pivot: categories named like columns cannot collide or disappear.
+    data: data
+      .map((row) => {
+        const order = plan.dimension
+          ? (ranks?.get(chartDomainKey(row[plan.dimension.field], plan.dimension.valueType)) ?? 0)
+          : Number(row[plan.xKey]);
+        const colorOrder = colorDomain
+          ? (colorRanks?.get(chartDomainKey(row[colorDomain.field], colorDomain.valueType)) ?? 0)
+          : 0;
+        // Values such as numeric 2 and JSON "002" share one category and its first display label.
+        const dimensionValue = chartValue(dimensionValues?.[order]);
+        return {
+          x: plan.dimension?.field === plan.xKey ? dimensionValue : chartValue(row[plan.xKey]),
+          y: plan.dimension?.field === plan.yKey ? dimensionValue : chartValue(row[plan.yKey]),
+          color: colorDomain ? chartValue(colorValues[colorOrder]) : null,
+          order,
+          colorOrder,
+        };
+      })
+      .sort((a, b) => a.order - b.order),
+    dimensionValues: dimensionValues?.map(chartValue),
+    colorValues: colorValues.map(chartValue),
+    colorIndexes: colorDomain
+      ? colorValues.map((value) => defaultRanks?.get(chartDomainKey(value, colorDomain.valueType)) ?? 0)
+      : [],
   };
 }

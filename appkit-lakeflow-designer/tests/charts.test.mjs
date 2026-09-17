@@ -6,39 +6,35 @@ import { after, before, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 import { build } from 'tsdown';
+import { compile } from 'vega-lite';
+import { parse, View } from 'vega';
 
 import { translatePublishedChart } from '../client/src/chartTranslation.ts';
 
-// Bundle the real public AppKit helpers, which have browser-oriented imports Node cannot resolve
-// directly. This uses the template's existing bundler and does not need a DOM or chart mocks.
-let buildPublishedChartOptions;
+let buildPublishedVegaLiteSpec;
 let preparePublishedChartData;
 let outputDirectory;
 before(async () => {
   outputDirectory = await mkdtemp(join(tmpdir(), 'designer-chart-test-'));
   await build({
-    entry: ['client/src/chartOptions.ts', 'client/src/chartData.ts'],
+    entry: ['client/src/chartSpec.ts', 'client/src/chartData.ts'],
     config: false,
     outDir: outputDirectory,
     outExtensions: () => ({ js: '.mjs' }),
-    noExternal: [/.*/],
     logLevel: 'silent',
   });
-  ({ buildPublishedChartOptions } = await import(
-    pathToFileURL(join(outputDirectory, 'chartOptions.mjs')).href
-  ));
+  ({ buildPublishedVegaLiteSpec } = await import(pathToFileURL(join(outputDirectory, 'chartSpec.mjs')).href));
   ({ preparePublishedChartData } = await import(pathToFileURL(join(outputDirectory, 'chartData.mjs')).href));
 });
 after(async () => {
-  if (outputDirectory !== undefined) {
-    await rm(outputDirectory, { recursive: true });
-  }
+  if (outputDirectory !== undefined) await rm(outputDirectory, { recursive: true });
 });
 
 const schema = [
   { name: 'sellingprice', type: 'double' },
   { name: 'count', type: 'long' },
 ];
+const labelSchema = [{ name: 'sellingprice', type: 'string' }, schema[1]];
 const spec = {
   widgetType: 'bar',
   encodings: {
@@ -48,6 +44,7 @@ const spec = {
   frame: { title: 'Fords Sold in 2015 by Selling Price', showTitle: true },
 };
 const ui = { axisLabel: '#555', axisTitle: '#222', grid: '#ddd', tooltipBg: '#fff' };
+const colors = ['#123456', '#abcdef', '#987654'];
 
 function planFor(chartSpec = spec, fields = schema) {
   const result = translatePublishedChart({ chartSpec, schema: fields });
@@ -55,136 +52,23 @@ function planFor(chartSpec = spec, fields = schema) {
   return result.plan;
 }
 
-function optionsFor(plan = planFor(), data = [{ sellingprice: 1000, count: 2 }]) {
-  const prepared = preparePublishedChartData(plan, data);
-  return buildPublishedChartOptions(plan, prepared, ['#123456', '#abcdef', '#987654'], ui);
+function chartFor(plan = planFor(), rows = [{ sellingprice: 1000, count: 2 }]) {
+  return buildPublishedVegaLiteSpec(plan, preparePublishedChartData(plan, rows), colors, ui);
 }
 
-const labelSchema = [{ name: 'sellingprice', type: 'string' }, schema[1]];
 function sortedSpec(sort) {
   return {
     ...spec,
-    encodings: {
-      ...spec.encodings,
-      x: { ...spec.encodings.x, scale: { type: 'categorical', sort } },
-    },
+    encodings: { ...spec.encodings, x: { ...spec.encodings.x, scale: { type: 'categorical', sort } } },
   };
 }
 
-test('default string sorting matches Designer, including lexicographic price buckets', () => {
-  const rows = [
-    { sellingprice: '$5,000 - $9,999', count: 1 },
-    { sellingprice: '$45,000 - $49,999', count: 2 },
-    { sellingprice: '$10,000 - $14,999', count: 3 },
-  ];
-  for (const widgetType of ['bar', 'line', 'area']) {
-    const options = optionsFor(planFor({ ...spec, widgetType }, labelSchema), rows);
-    assert.deepEqual(options.xAxis.data, ['$10,000 - $14,999', '$45,000 - $49,999', '$5,000 - $9,999']);
-    assert.deepEqual(options.series[0].data, [3, 2, 1]);
-  }
-  assert.equal(rows[0].count, 1, 'sorting must not mutate the result table');
-});
-
-test('numeric categories sort by their schema type without changing their labels', () => {
-  const rows = [
-    { sellingprice: '10', count: 1 },
-    { sellingprice: '002', count: 2 },
-    { sellingprice: null, count: 3 },
-  ];
-  const options = optionsFor(planFor(), rows);
-  assert.deepEqual(options.xAxis.data, ['-', '002', '10']);
-  assert.deepEqual(options.series[0].data, [3, 2, 1]);
-  const descending = optionsFor(planFor(sortedSpec({ by: 'natural-order-reversed' })), rows);
-  assert.deepEqual(descending.xAxis.data, ['10', '002', '-']);
-});
-
-test('explicit custom order puts omitted labels in natural order and ignores duplicate entries', () => {
-  const options = optionsFor(
-    planFor(sortedSpec({ by: 'custom-order', orderedValues: ['B', 'B', 'absent', 'A'] }), labelSchema),
-    ['D', 'A', 'C', 'B'].map((sellingprice, count) => ({ sellingprice, count })),
-  );
-  assert.deepEqual(options.xAxis.data, ['B', 'A', 'C', 'D']);
-  assert.deepEqual(options.series[0].data, [3, 1, 2, 0]);
-});
-
-for (const by of ['original-order', 'original-order-reversed', 'y', 'y-reversed']) {
-  test(`explicit ${by} sorts the category domain, not individual rows`, () => {
-    const options = optionsFor(planFor(sortedSpec({ by }), labelSchema), [
-      { sellingprice: 'B', count: 5 },
-      { sellingprice: 'A', count: 8 },
-      { sellingprice: 'B', count: 6 },
-    ]);
-    const bFirst = by === 'original-order' || by === 'y-reversed';
-    assert.deepEqual(options.xAxis.data, bFirst ? ['B', 'B', 'A'] : ['A', 'B', 'B']);
-    assert.deepEqual(options.series[0].data, bFirst ? [5, 6, 8] : [8, 5, 6]);
-  });
-}
-
-test('horizontal bars resolve sort-by-x and display sorted categories top to bottom', () => {
-  const plan = planFor(
-    {
-      ...spec,
-      encodings: {
-        x: spec.encodings.y,
-        y: { ...spec.encodings.x, scale: { type: 'categorical', sort: { by: 'x-reversed' } } },
-      },
-    },
-    labelSchema,
-  );
-  const options = optionsFor(plan, [
-    { sellingprice: 'A', count: 2 },
-    { sellingprice: 'B', count: 5 },
-  ]);
-  assert.deepEqual(options.yAxis.data, ['B', 'A']);
-  assert.equal(options.yAxis.inverse, true);
-  assert.deepEqual(options.series[0].data, [5, 2]);
-});
-
-test('horizontal bars default to natural category order, starting at the top', () => {
-  const plan = planFor({ ...spec, encodings: { x: spec.encodings.y, y: spec.encodings.x } }, labelSchema);
-  const options = optionsFor(plan, [
-    { sellingprice: 'B', count: 5 },
-    { sellingprice: 'A', count: 2 },
-  ]);
-  assert.deepEqual(options.yAxis.data, ['A', 'B']);
-  assert.equal(options.yAxis.inverse, true);
-  assert.deepEqual(options.series[0].data, [2, 5]);
-});
-
-test('boolean and temporal categories use typed sorting while preserving their labels', () => {
-  for (const { type, values, expected } of [
-    { type: 'boolean', values: [true, false], expected: ['false', 'true'] },
-    {
-      type: 'timestamp',
-      values: ['2025-01-01T01:00:00+02:00', '2025-01-01T00:30:00+02:00'],
-      expected: ['2025-01-01T00:30:00+02:00', '2025-01-01T01:00:00+02:00'],
-    },
-  ]) {
-    const options = optionsFor(
-      planFor(spec, [{ name: 'sellingprice', type }, schema[1]]),
-      values.map((sellingprice, count) => ({ sellingprice, count })),
-    );
-    assert.deepEqual(options.xAxis.data, expected);
-    assert.deepEqual(options.series[0].data, [1, 0]);
-  }
-});
-
-test('numeric custom orders match JSON string values and naturally sort unlisted values', () => {
-  const options = optionsFor(planFor(sortedSpec({ by: 'custom-order', orderedValues: [10, 2] })), [
-    { sellingprice: '20', count: 0 },
-    { sellingprice: '002', count: 1 },
-    { sellingprice: '3', count: 2 },
-    { sellingprice: '10', count: 3 },
-  ]);
-  assert.deepEqual(options.xAxis.data, ['10', '002', '3', '20']);
-  assert.deepEqual(options.series[0].data, [3, 1, 2, 0]);
-});
-
-function seriesPlan(sort, colorSort, fields = labelSchema) {
+function seriesPlan(sort, colorSort, fields = labelSchema, mark) {
   const chartSpec = sortedSpec(sort);
   return planFor(
     {
       ...chartSpec,
+      mark,
       encodings: {
         ...chartSpec.encodings,
         color: { fieldName: 'series', scale: { type: 'categorical', sort: colorSort } },
@@ -194,130 +78,260 @@ function seriesPlan(sort, colorSort, fields = labelSchema) {
   );
 }
 
+function piePlan(sort) {
+  return planFor(
+    { ...spec, widgetType: 'pie', encodings: { color: sortedSpec(sort).encodings.x, angle: spec.encodings.y } },
+    labelSchema,
+  );
+}
+
 const seriesRows = [
   { sellingprice: 'B', series: 'Beta', count: '6', priority: '1' },
   { sellingprice: 'A', series: 'Alpha', count: null, priority: '20' },
   { sellingprice: 'B', series: 'Alpha', count: '5', priority: '1' },
   { sellingprice: 'A', series: 'Beta', count: '8', priority: '20' },
 ];
+const pieRows = [
+  { sellingprice: '2025-12-01', count: 2 },
+  { sellingprice: '2025-06-01', count: 4 },
+  { sellingprice: '2025-01-01', count: 8 },
+];
 
-test('measure sorting ranks category totals before pivoting and keeps all series aligned', () => {
-  const plan = seriesPlan({ by: 'y-reversed' }, { by: 'natural-order-reversed' });
-  const options = optionsFor(plan, seriesRows);
-  assert.deepEqual(options.xAxis.data, ['B', 'A']);
-  assert.deepEqual(
-    options.series.map(({ name, data, color }) => ({ name, data, color })),
-    [
-      { name: 'Beta', data: [6, 8], color: '#abcdef' },
-      { name: 'Alpha', data: [5, '-'], color: '#123456' },
-    ],
-  );
-  assert.equal(seriesRows[0].count, '6', 'coercing/pivoting must not mutate result rows');
-});
+async function render(chart, check) {
+  const warnings = [];
+  const logger = {
+    level: () => 0,
+    debug() {},
+    info() {},
+    warn: (...args) => warnings.push(args),
+    error: (...args) => {
+      throw new Error(args.join(' '));
+    },
+  };
+  const compiled = compile(chart, { logger }).spec;
+  const view = new View(parse(compiled), { renderer: 'none', logger });
+  try {
+    await view.runAsync();
+    const svg = await view.toSVG();
+    assert.ok(svg.startsWith('<svg'));
+    assert.doesNotMatch(svg, /NaN|Infinity/);
+    assert.deepEqual(warnings, [], 'the actual compiler/runtime must accept the chart without warnings');
+    await check?.(view, svg);
+  } finally {
+    view.finalize();
+  }
+}
 
-test('a custom measure field remains available for sorting before the series pivot', () => {
-  const plan = seriesPlan({ by: 'measure-reversed', measure: { fieldName: 'priority' } }, undefined, [
-    ...labelSchema,
-    { name: 'priority', type: 'double' },
-  ]);
-  const options = optionsFor(plan, seriesRows);
-  assert.deepEqual(options.xAxis.data, ['A', 'B']);
-  assert.deepEqual(
-    options.series.map(({ name, data }) => ({ name, data })),
-    [
-      { name: 'Alpha', data: ['-', 5] },
-      { name: 'Beta', data: [8, 6] },
-    ],
-  );
-});
-
-test('series can sort by measure totals or custom order without reassigning their colors', () => {
-  for (const sort of [{ by: 'y-reversed' }, { by: 'custom-order', orderedValues: ['Beta'] }]) {
-    const options = optionsFor(seriesPlan(undefined, sort), seriesRows);
-    assert.deepEqual(options.xAxis.data, ['A', 'B']);
+test('default string sorting matches Designer, including lexicographic price buckets', () => {
+  const rows = [
+    { sellingprice: '$5,000 - $9,999', count: 1 },
+    { sellingprice: '$45,000 - $49,999', count: 2 },
+    { sellingprice: '$10,000 - $14,999', count: 3 },
+  ];
+  for (const widgetType of ['bar', 'line', 'area']) {
+    const chart = chartFor(planFor({ ...spec, widgetType }, labelSchema), rows);
+    assert.deepEqual(chart.encoding.x.scale.domain, ['$10,000 - $14,999', '$45,000 - $49,999', '$5,000 - $9,999']);
     assert.deepEqual(
-      options.series.map(({ name, color }) => ({ name, color })),
-      [
-        { name: 'Beta', color: '#abcdef' },
-        { name: 'Alpha', color: '#123456' },
-      ],
+      chart.data.values.map(({ y }) => y),
+      [3, 2, 1],
+    );
+  }
+  assert.equal(rows[0].count, 1);
+});
+
+test('numeric categories sort by schema type without changing labels or dropping nulls', () => {
+  const rows = [
+    { sellingprice: '10', count: 1 },
+    { sellingprice: '002', count: 2 },
+    { sellingprice: null, count: 3 },
+  ];
+  const chart = chartFor(planFor(), rows);
+  assert.deepEqual(chart.encoding.x.scale.domain, [null, '002', '10']);
+  assert.deepEqual(
+    chart.data.values.map(({ y }) => y),
+    [3, 2, 1],
+  );
+  assert.deepEqual(chartFor(planFor(sortedSpec({ by: 'natural-order-reversed' })), rows).encoding.x.scale.domain, [
+    '10',
+    '002',
+    null,
+  ]);
+});
+
+test('explicit custom order naturally sorts omitted values and ignores duplicate entries', () => {
+  const chart = chartFor(
+    planFor(sortedSpec({ by: 'custom-order', orderedValues: ['B', 'B', 'absent', 'A'] }), labelSchema),
+    ['D', 'A', 'C', 'B'].map((sellingprice, count) => ({ sellingprice, count })),
+  );
+  assert.deepEqual(chart.encoding.x.scale.domain, ['B', 'A', 'C', 'D']);
+  assert.deepEqual(
+    chart.data.values.map(({ y }) => y),
+    [3, 1, 2, 0],
+  );
+});
+
+for (const by of ['original-order', 'original-order-reversed', 'y', 'y-reversed']) {
+  test(`explicit ${by} sorts categories without aggregating duplicate rows`, () => {
+    const chart = chartFor(planFor(sortedSpec({ by }), labelSchema), [
+      { sellingprice: 'B', count: 5 },
+      { sellingprice: 'A', count: 8 },
+      { sellingprice: 'B', count: 6 },
+    ]);
+    const bFirst = by === 'original-order' || by === 'y-reversed';
+    assert.deepEqual(chart.encoding.x.scale.domain, bFirst ? ['B', 'A'] : ['A', 'B']);
+    assert.deepEqual(
+      chart.data.values.map(({ y }) => y),
+      bFirst ? [5, 6, 8] : [8, 5, 6],
+    );
+  });
+}
+
+for (const sort of [undefined, { by: 'x-reversed' }]) {
+  test(`horizontal bars honor ${sort?.by ?? 'default'} sort from top to bottom in Vega`, async () => {
+    const plan = planFor(
+      { ...spec, encodings: { x: spec.encodings.y, y: { ...spec.encodings.x, scale: { type: 'categorical', sort } } } },
+      labelSchema,
+    );
+    const chart = chartFor(plan, [
+      { sellingprice: 'B', count: 5 },
+      { sellingprice: 'A', count: 2 },
+    ]);
+    assert.equal(plan.xKey, 'count');
+    assert.equal(plan.yKey, 'sellingprice');
+    assert.equal(chart.mark.orient, 'horizontal');
+    const expected = sort ? ['B', 'A'] : ['A', 'B'];
+    assert.deepEqual(chart.encoding.y.scale.domain, expected);
+    await render(chart, (view) => {
+      assert.deepEqual(view.scale('y').domain(), expected);
+      assert.ok(view.scale('y')(expected[0]) < view.scale('y')(expected[1]));
+    });
+  });
+}
+
+test('boolean and temporal categories use typed sorting while preserving labels', () => {
+  for (const { type, values, expected } of [
+    { type: 'boolean', values: [true, false], expected: [false, true] },
+    {
+      type: 'timestamp',
+      values: ['2025-01-01T01:00:00+02:00', '2025-01-01T00:30:00+02:00'],
+      expected: ['2025-01-01T00:30:00+02:00', '2025-01-01T01:00:00+02:00'],
+    },
+  ]) {
+    const chart = chartFor(
+      planFor(spec, [{ name: 'sellingprice', type }, schema[1]]),
+      values.map((sellingprice, count) => ({ sellingprice, count })),
+    );
+    assert.deepEqual(chart.encoding.x.scale.domain, expected);
+    assert.deepEqual(
+      chart.data.values.map(({ y }) => y),
+      [1, 0],
     );
   }
 });
 
-test('numeric series labels sort numerically before conversion to wide-format keys', () => {
-  const plan = planFor(
-    {
-      ...spec,
-      encodings: { ...spec.encodings, color: { fieldName: 'series' } },
-    },
-    [...schema, { name: 'series', type: 'int' }],
+test('numeric custom order matches JSON string values and naturally sorts unlisted values', () => {
+  const chart = chartFor(
+    planFor(sortedSpec({ by: 'custom-order', orderedValues: [10, 2] })),
+    ['20', '002', '3', '10'].map((sellingprice, count) => ({ sellingprice, count })),
   );
-  const options = optionsFor(plan, [
-    { sellingprice: 1, series: '10', count: 8 },
-    { sellingprice: 1, series: '2', count: 3 },
-  ]);
+  assert.deepEqual(chart.encoding.x.scale.domain, ['10', '002', '3', '20']);
   assert.deepEqual(
-    options.series.map(({ name, data }) => ({ name, data })),
-    [
-      { name: '2', data: [3] },
-      { name: '10', data: [8] },
-    ],
+    chart.data.values.map(({ y }) => y),
+    [3, 1, 2, 0],
   );
 });
 
-test('measure sort preserves Designer tie and null-total behavior without treating blanks as zero', () => {
+test('measure sorting ranks category totals and preserves the long-format series', () => {
+  const chart = chartFor(seriesPlan({ by: 'y-reversed' }, { by: 'natural-order-reversed' }), seriesRows);
+  assert.deepEqual(chart.encoding.x.scale.domain, ['B', 'A']);
+  assert.deepEqual(chart.encoding.color.scale.domain, ['Beta', 'Alpha']);
+  assert.deepEqual(chart.encoding.color.scale.range, [colors[1], colors[0]]);
+  assert.deepEqual(
+    chart.data.values.map(({ x, y, color }) => ({ x, y, color })),
+    [
+      { x: 'B', y: 6, color: 'Beta' },
+      { x: 'B', y: 5, color: 'Alpha' },
+      { x: 'A', y: null, color: 'Alpha' },
+      { x: 'A', y: 8, color: 'Beta' },
+    ],
+  );
+  assert.equal(seriesRows[0].count, '6');
+});
+
+test('a custom measure remains available for sorting without leaking into the chart dataset', () => {
+  const chart = chartFor(
+    seriesPlan({ by: 'measure-reversed', measure: { fieldName: 'priority' } }, undefined, [
+      ...labelSchema,
+      { name: 'priority', type: 'double' },
+    ]),
+    seriesRows,
+  );
+  assert.deepEqual(chart.encoding.x.scale.domain, ['A', 'B']);
+  assert.equal(chart.data.values[0].priority, undefined);
+});
+
+for (const sort of [{ by: 'y-reversed' }, { by: 'custom-order', orderedValues: ['Beta'] }]) {
+  test(`series ${sort.by} preserves category colors`, async () => {
+    const chart = chartFor(seriesPlan(undefined, sort), seriesRows);
+    assert.deepEqual(chart.encoding.color.scale.domain, ['Beta', 'Alpha']);
+    assert.deepEqual(chart.encoding.color.scale.range, [colors[1], colors[0]]);
+    await render(chart, (view) => {
+      assert.equal(view.scale('color')('Alpha'), colors[0]);
+      assert.equal(view.scale('color')('Beta'), colors[1]);
+    });
+  });
+}
+
+test('numeric series labels sort numerically', () => {
+  const plan = planFor({ ...spec, encodings: { ...spec.encodings, color: { fieldName: 'series' } } }, [
+    ...schema,
+    { name: 'series', type: 'int' },
+  ]);
+  assert.deepEqual(
+    chartFor(plan, [
+      { sellingprice: 1, series: '10', count: 8 },
+      { sellingprice: 1, series: '2', count: 3 },
+    ]).encoding.color.scale.domain,
+    ['2', '10'],
+  );
+});
+
+test('measure sort preserves ties and null totals without turning blanks into zero', () => {
   const rows = [
     { sellingprice: 'A', count: 5 },
     { sellingprice: 'B', count: 5 },
     { sellingprice: 'C', count: ' ' },
     { sellingprice: 'D', count: null },
   ];
-  const ascending = optionsFor(planFor(sortedSpec({ by: 'y' }), labelSchema), rows);
-  assert.deepEqual(ascending.xAxis.data, ['A', 'B', 'C', 'D']);
-  const descending = optionsFor(planFor(sortedSpec({ by: 'y-reversed' }), labelSchema), rows);
-  assert.deepEqual(descending.xAxis.data, ['D', 'C', 'B', 'A']);
-  assert.deepEqual(descending.series[0].data, ['-', '-', 5, 5]);
-});
-
-function piePlan(sort) {
-  return planFor(
-    {
-      ...spec,
-      widgetType: 'pie',
-      encodings: { color: sortedSpec(sort).encodings.x, angle: spec.encodings.y },
-    },
-    labelSchema,
-  );
-}
-
-const pieRows = [
-  { sellingprice: '2025-12-01', count: '2' },
-  { sellingprice: '2025-01-01', count: '8' },
-  { sellingprice: '2025-06-01', count: '4' },
-];
-
-test('pie defaults to descending angle totals, without AppKit date inference reordering slices', () => {
-  const options = optionsFor(piePlan(), pieRows);
-  assert.deepEqual(options.series[0].data, [
-    { name: '2025-01-01', value: 8, itemStyle: { color: '#123456' } },
-    { name: '2025-06-01', value: 4, itemStyle: { color: '#abcdef' } },
-    { name: '2025-12-01', value: 2, itemStyle: { color: '#987654' } },
+  assert.deepEqual(chartFor(planFor(sortedSpec({ by: 'y' }), labelSchema), rows).encoding.x.scale.domain, [
+    'A',
+    'B',
+    'C',
+    'D',
   ]);
-  assert.equal(options.legend.textStyle.color, ui.axisTitle);
+  const chart = chartFor(planFor(sortedSpec({ by: 'y-reversed' }), labelSchema), rows);
+  assert.deepEqual(chart.encoding.x.scale.domain, ['D', 'C', 'B', 'A']);
+  assert.deepEqual(
+    chart.data.values.map(({ y }) => y),
+    [null, null, 5, 5],
+  );
 });
 
-test('pie default ranking uses category totals without rewriting the displayed measures', () => {
-  const options = optionsFor(piePlan(), [
+test('pies default to descending angle totals without aggregating returned rows', () => {
+  const chart = chartFor(piePlan(), [
     { sellingprice: 'B', count: 5 },
     { sellingprice: 'A', count: 8 },
     { sellingprice: 'B', count: 6 },
   ]);
-  assert.deepEqual(options.series[0].data, [
-    { name: 'B', value: 5, itemStyle: { color: '#123456' } },
-    { name: 'B', value: 6, itemStyle: { color: '#123456' } },
-    { name: 'A', value: 8, itemStyle: { color: '#abcdef' } },
-  ]);
+  assert.deepEqual(chart.encoding.color.scale.domain, ['B', 'A']);
+  assert.deepEqual(
+    chart.data.values.map(({ x, y }) => [x, y]),
+    [
+      ['B', 5],
+      ['B', 6],
+      ['A', 8],
+    ],
+  );
 });
 
 for (const sort of [
@@ -325,22 +339,24 @@ for (const sort of [
   { by: 'natural-order-reversed' },
   { by: 'custom-order', orderedValues: ['2025-12-01', '2025-06-01'] },
 ]) {
-  test(`pie explicit ${sort.by} changes order but preserves category colors`, () => {
-    const options = optionsFor(piePlan(sort), pieRows);
-    assert.deepEqual(options.series[0].data, [
-      { name: '2025-12-01', value: 2, itemStyle: { color: '#987654' } },
-      { name: '2025-06-01', value: 4, itemStyle: { color: '#abcdef' } },
-      { name: '2025-01-01', value: 8, itemStyle: { color: '#123456' } },
-    ]);
+  test(`pie explicit ${sort.by} preserves slice order and colors in Vega`, async () => {
+    const chart = chartFor(piePlan(sort), pieRows);
+    assert.deepEqual(
+      chart.encoding.color.scale.domain,
+      pieRows.map(({ sellingprice }) => sellingprice),
+    );
+    assert.deepEqual(chart.encoding.color.scale.range, [...colors].reverse());
+    assert.deepEqual(
+      chart.data.values.map(({ y }) => y),
+      [2, 4, 8],
+    );
+    await render(chart);
   });
 }
 
-test('missing sort fields and unsupported sorts fall back to rows instead of showing a wrong order', () => {
+test('missing sort fields and unsupported sorts fall back to rows', () => {
   assert.deepEqual(
-    translatePublishedChart({
-      chartSpec: sortedSpec({ by: 'measure', measure: { fieldName: 'missing' } }),
-      schema,
-    }),
+    translatePublishedChart({ chartSpec: sortedSpec({ by: 'measure', measure: { fieldName: 'missing' } }), schema }),
     { ok: false, refusal: { reason: 'fieldNotInResult', fieldName: 'missing' } },
   );
   for (const sort of [{ by: 'unknown' }, { by: 'measure' }, { by: 'custom-order' }]) {
@@ -351,58 +367,48 @@ test('missing sort fields and unsupported sorts fall back to rows instead of sho
   }
 });
 
-test('empty results stay empty for categorical, grouped and pie charts', () => {
+test('empty categorical, grouped and pie results compile and render without fake data', async () => {
   for (const plan of [planFor(), seriesPlan(), piePlan()]) {
-    const prepared = preparePublishedChartData(plan, []);
-    assert.deepEqual(prepared.data, []);
-    assert.doesNotThrow(() => optionsFor(plan, []));
+    const chart = chartFor(plan, []);
+    assert.deepEqual(chart.data.values, []);
+    await render(chart);
   }
 });
 
-test('the Ford chart keeps numeric selling prices categorical and renders vertical bars', () => {
+test('Ford chart preserves category labels and vertical bars with Designer spacing', async () => {
   const plan = planFor();
-  assert.equal(plan.orientation, 'vertical');
   assert.equal(plan.xType, 'nominal');
   assert.deepEqual(plan.coercions, [{ field: 'count', to: 'number' }]);
-  const options = optionsFor(plan, [
+  const chart = chartFor(plan, [
     { sellingprice: '001000', count: 2 },
     { sellingprice: '2000', count: 5 },
   ]);
-  assert.equal(options.xAxis.type, 'category');
-  assert.deepEqual(options.xAxis.data, ['001000', '2000']);
-  assert.equal(options.yAxis.type, 'value');
-  assert.equal(options.series[0].type, 'bar');
-  assert.deepEqual(options.series[0].data, [2, 5]);
-  assert.equal(options.series[0].itemStyle.borderRadius, 0);
+  assert.equal(chart.mark.type, 'bar');
+  assert.equal(chart.mark.orient, 'vertical');
+  assert.equal(chart.config.scale.bandPaddingInner, 0.1);
+  assert.equal(chart.config.scale.bandPaddingOuter, 0.05);
+  await render(chart, (view, svg) => {
+    assert.deepEqual(view.scale('x').domain(), ['001000', '2000']);
+    assert.equal(view.scale('y').domain()[0], 0);
+    assert.match(svg, /001000/);
+    assert.match(svg, /price range/);
+  });
 });
 
-test('preserves chart and axis titles without losing AppKit theme or axis data', () => {
-  const options = optionsFor();
-  assert.equal(options.title.text, spec.frame.title);
-  assert.equal(options.xAxis.name, 'price range');
-  assert.equal(options.yAxis.name, 'count');
-  assert.equal(options.xAxis.axisLabel.color, ui.axisLabel);
-  assert.equal(options.yAxis.nameTextStyle.color, ui.axisTitle);
-  assert.deepEqual(options.xAxis.data, [1000]);
-  assert.equal(options.grid.containLabel, true);
+test('preserves chart and axis titles and AppKit theme tokens', () => {
+  const chart = chartFor();
+  assert.equal(chart.title, spec.frame.title);
+  assert.equal(chart.encoding.x.title, 'price range');
+  assert.equal(chart.encoding.y.title, 'count');
+  assert.equal(chart.config.axis.labelColor, ui.axisLabel);
+  assert.equal(chart.config.axis.titleColor, ui.axisTitle);
+  assert.equal(chart.config.axis.gridColor, ui.grid);
+  assert.equal(chart.config.axis.domain, false);
+  assert.equal(chart.config.legend.titleColor, ui.axisTitle);
 });
 
-test('keeps genuinely horizontal bars horizontal and binds the dimension and measure correctly', () => {
-  const plan = planFor({ ...spec, encodings: { x: spec.encodings.y, y: spec.encodings.x } });
-  assert.equal(plan.orientation, 'horizontal');
-  assert.equal(plan.xKey, 'sellingprice');
-  assert.equal(plan.yKey, 'count');
-  const options = optionsFor(plan);
-  assert.equal(options.xAxis.type, 'value');
-  assert.equal(options.xAxis.name, 'count');
-  assert.equal(options.yAxis.type, 'category');
-  assert.equal(options.yAxis.name, 'price range');
-  assert.deepEqual(options.yAxis.data, [1000]);
-  assert.deepEqual(options.series[0].data, [2]);
-});
-
-test('respects hidden chart titles and custom or hidden axis titles', () => {
-  const options = optionsFor(
+test('respects hidden chart titles and custom/hidden axis titles', () => {
+  const chart = chartFor(
     planFor({
       ...spec,
       frame: { ...spec.frame, showTitle: false },
@@ -412,9 +418,9 @@ test('respects hidden chart titles and custom or hidden axis titles', () => {
       },
     }),
   );
-  assert.equal(options.title, undefined);
-  assert.equal(options.xAxis.name, 'Sale price');
-  assert.equal(options.yAxis.name, '');
+  assert.equal(chart.title, undefined);
+  assert.equal(chart.encoding.x.title, 'Sale price');
+  assert.equal(chart.encoding.y.title, null);
 });
 
 test('uses schema types when a scale is absent', () => {
@@ -424,110 +430,191 @@ test('uses schema types when a scale is absent', () => {
   );
 });
 
-test('numeric x axes use value coordinates, not equally spaced categories or dates', () => {
-  const plan = planFor({
-    ...spec,
-    encodings: { ...spec.encodings, x: { ...spec.encodings.x, scale: { type: 'quantitative' } } },
-  });
-  const options = optionsFor(plan, [
-    { sellingprice: 1, count: 2 },
-    { sellingprice: 100, count: 5 },
-  ]);
-  assert.equal(options.xAxis.type, 'value');
-  assert.deepEqual(options.series[0].data, [
-    [1, 2],
-    [100, 5],
-  ]);
+test('numeric axes use continuous coordinates with sorted values, not categories or dates', async () => {
+  const chart = chartFor(
+    planFor({
+      ...spec,
+      widgetType: 'line',
+      encodings: {
+        ...spec.encodings,
+        x: { ...spec.encodings.x, scale: { type: 'quantitative', sort: { by: 'natural-order-reversed' } } },
+      },
+    }),
+    [
+      { sellingprice: 100, count: 5 },
+      { sellingprice: 1, count: 2 },
+    ],
+  );
+  assert.deepEqual(
+    chart.data.values.map(({ x, y }) => [x, y]),
+    [
+      [1, 2],
+      [100, 5],
+    ],
+  );
+  assert.equal(chart.encoding.x.type, 'quantitative');
+  await render(chart, (view) => assert.equal(view.scale('x').type, 'linear'));
 });
 
-test('date-looking category labels and row order survive unrelated date columns', () => {
-  const rows = [
+test('date-looking categories and original order survive unrelated date columns', () => {
+  const chart = chartFor(planFor(sortedSpec({ by: 'original-order' }), labelSchema), [
     { sellingprice: '2025-12-01', count: 3, created_date: '2025-01-01' },
     { sellingprice: '2025-01-01', count: 8, created_date: '2025-12-01' },
-  ];
-  const options = optionsFor(planFor(sortedSpec({ by: 'original-order' }), labelSchema), rows);
-  assert.equal(options.xAxis.type, 'category');
-  assert.deepEqual(options.xAxis.data, ['2025-12-01', '2025-01-01']);
-  assert.deepEqual(options.series[0].data, [3, 8]);
+  ]);
+  assert.equal(chart.encoding.x.type, 'nominal');
+  assert.deepEqual(chart.encoding.x.scale.domain, ['2025-12-01', '2025-01-01']);
+  assert.deepEqual(
+    chart.data.values.map(({ y }) => y),
+    [3, 8],
+  );
 });
 
-test('temporal axes plot decoded dates on a time axis', () => {
+test('temporal axes decode and sort dates without converting missing dates to the epoch', async () => {
   const plan = planFor({
     ...spec,
     widgetType: 'line',
     encodings: { ...spec.encodings, x: { ...spec.encodings.x, scale: { type: 'temporal' } } },
   });
-  const date = new Date('2025-01-01T00:00:00Z');
-  const options = optionsFor(plan, [{ sellingprice: date, count: 2 }]);
-  assert.equal(options.xAxis.type, 'time');
-  assert.deepEqual(options.series[0].data, [[date.getTime(), 2]]);
-});
-
-test('continuous axes sort coordinates together with their series values', () => {
-  const plan = planFor({
-    ...spec,
-    widgetType: 'line',
-    encodings: {
-      ...spec.encodings,
-      // Categorical sort settings do not reorder continuous coordinates.
-      x: { ...spec.encodings.x, scale: { type: 'quantitative', sort: { by: 'natural-order-reversed' } } },
-    },
-  });
-  const options = optionsFor(plan, [
-    { sellingprice: 100, count: 5 },
-    { sellingprice: 1, count: 2 },
+  const chart = chartFor(plan, [
+    { sellingprice: '2025-01-02', count: 2 },
+    { sellingprice: new Date('2025-01-01'), count: 1 },
+    { sellingprice: '', count: 3 },
   ]);
-  assert.deepEqual(options.series[0].data, [
-    [1, 2],
-    [100, 5],
-  ]);
+  assert.equal(chart.encoding.x.scale.type, 'utc');
+  assert.deepEqual(
+    chart.data.values.map(({ x }) => x),
+    [null, Date.parse('2025-01-01'), Date.parse('2025-01-02')],
+  );
+  await render(chart);
 });
 
 for (const widgetType of ['line', 'area']) {
   for (const lineShape of [undefined, 'linear', 'smooth', 'step']) {
-    test(`${widgetType} honors line shape ${lineShape ?? 'default (linear)'}`, () => {
-      const options = optionsFor(planFor({ ...spec, widgetType, mark: { lineShape } }));
-      assert.equal(options.series[0].smooth, lineShape === 'smooth');
-      assert.equal(options.series[0].step, lineShape === 'step' ? 'end' : undefined);
-      assert.equal(options.series[0].type, 'line');
+    test(`${widgetType} honors line shape ${lineShape ?? 'default (linear)'}`, async () => {
+      const chart = chartFor(planFor({ ...spec, widgetType, mark: { lineShape } }), [
+        { sellingprice: 1, count: 2 },
+        { sellingprice: 2, count: 5 },
+      ]);
+      assert.equal(
+        chart.mark.interpolate,
+        lineShape === 'smooth' ? 'monotone' : lineShape === 'step' ? 'step-after' : 'linear',
+      );
+      await render(chart);
     });
   }
 }
 
-test('missing measures remain gaps, and duplicate categories are not silently summed', () => {
-  const options = optionsFor(planFor(), [
+test('missing measures remain gaps and duplicate categories are not silently summed', () => {
+  const chart = chartFor(planFor(), [
     { sellingprice: 1000, count: null },
     { sellingprice: 1000, count: 2 },
   ]);
-  assert.deepEqual(options.xAxis.data, [1000, 1000]);
-  assert.deepEqual(options.series[0].data, ['-', 2]);
+  assert.deepEqual(
+    chart.data.values.map(({ y }) => y),
+    [null, 2],
+  );
+  assert.equal(chart.encoding.y.aggregate, undefined);
+  assert.equal(chart.config.mark.invalid, 'break-paths-filter-domains');
 });
 
-test('multiple series retain their aligned data and theme colors', () => {
-  const options = optionsFor(seriesPlan(undefined, undefined, schema), [
-    { sellingprice: 1000, series: 'first', count: 2 },
-    { sellingprice: 1000, series: 'second', count: 4 },
-  ]);
-  assert.deepEqual(
-    options.series.map((series) => series.data),
-    [[2], [4]],
+test('series with column-like names and literal dot/bracket field names cannot collide', async () => {
+  const plan = planFor(
+    {
+      widgetType: 'bar',
+      encodings: {
+        x: { fieldName: 'x.value[0]', scale: { type: 'categorical' } },
+        y: { fieldName: '__proto__', scale: { type: 'quantitative' } },
+        color: { fieldName: 'color' },
+      },
+    },
+    [
+      { name: 'x.value[0]', type: 'string' },
+      { name: '__proto__', type: 'double' },
+      { name: 'color', type: 'string' },
+    ],
   );
-  assert.equal(options.legend.textStyle.color, ui.axisTitle);
-  assert.deepEqual(
-    options.series.map(({ color }) => color),
-    ['#123456', '#abcdef'],
-  );
+  const row = JSON.parse('{"x.value[0]":"A","__proto__":4,"color":"x.value[0]"}');
+  const chart = chartFor(plan, [row]);
+  assert.equal(chart.data.values[0].y, 4);
+  assert.equal(chart.data.values[0].color, 'x.value[0]');
+  await render(chart);
 });
 
-test('pie charts preserve their title and still bind category and angle', () => {
-  const plan = planFor({
-    ...spec,
-    widgetType: 'pie',
-    encodings: { color: spec.encodings.x, angle: spec.encodings.y },
+for (const layout of [undefined, 'stack', 'group', 'layer', 'percent-stack']) {
+  test(`series bars render Designer ${layout ?? 'default stacked'} layout`, async () => {
+    const chart = chartFor(seriesPlan(undefined, undefined, labelSchema, { layout }), seriesRows);
+    assert.equal(
+      chart.encoding.y.stack,
+      layout === 'percent-stack' ? 'normalize' : !layout || layout === 'stack' ? 'zero' : null,
+    );
+    assert.equal(Boolean(chart.encoding.xOffset), layout === 'group');
+    await render(chart, (view) => {
+      if (!layout || layout === 'stack') assert.ok(view.scale('y').domain().at(-1) >= 11);
+      if (layout === 'percent-stack') assert.deepEqual(view.scale('y').domain(), [0, 1]);
+    });
   });
-  assert.equal(plan.title, spec.frame.title);
-  assert.equal(plan.xKey, 'sellingprice');
-  assert.equal(plan.yKey, 'count');
+}
+
+test('color on the dimension uses layers instead of stacking a category over itself', () => {
+  const plan = planFor({ ...spec, encodings: { ...spec.encodings, color: spec.encodings.x } });
+  assert.equal(plan.layout, 'layer');
+});
+
+test('pie charts keep titles and default to Designer donut radius, with explicit full-pie support', async () => {
+  for (const innerRadius of [undefined, 0, 75, 500, -10]) {
+    const plan = planFor({
+      ...spec,
+      widgetType: 'pie',
+      encodings: { color: spec.encodings.x, angle: spec.encodings.y },
+      mark: { innerRadius },
+    });
+    const chart = chartFor(plan);
+    assert.equal(chart.title, spec.frame.title);
+    assert.equal(plan.xKey, 'sellingprice');
+    assert.equal(plan.yKey, 'count');
+    assert.equal(plan.innerRadius, Math.min(100, Math.max(0, innerRadius ?? 50)));
+    await render(chart);
+  }
+});
+
+test('explicit axis visibility, label angle, bounds and reversal survive translation', async () => {
+  const chart = chartFor(
+    planFor({
+      ...spec,
+      encodings: {
+        x: { ...spec.encodings.x, axis: { labelAngle: 45, hideLabels: true } },
+        y: {
+          ...spec.encodings.y,
+          axis: { hideGrid: true },
+          scale: { type: 'quantitative', domain: { min: 1, max: 10 }, reverse: true },
+        },
+      },
+    }),
+  );
+  assert.equal(chart.encoding.x.axis.labelAngle, 45);
+  assert.equal(chart.encoding.x.axis.labels, false);
+  assert.equal(chart.encoding.y.axis.grid, false);
+  await render(chart, (view) => {
+    assert.deepEqual(view.scale('y').domain(), [1, 10]);
+    assert.ok(view.scale('y')(1) < view.scale('y')(10));
+  });
+  assert.equal(
+    chartFor(planFor({ ...spec, encodings: { ...spec.encodings, x: { ...spec.encodings.x, axis: { hide: true } } } }))
+      .encoding.x.axis,
+    null,
+  );
+});
+
+test('categorical label rotation responds to width while the chart resizes', async () => {
+  const chart = chartFor(planFor(spec, labelSchema), [
+    { sellingprice: 'A long category label', count: 2 },
+    { sellingprice: 'Another long category label', count: 5 },
+  ]);
+  await render(chart, async (view, svg) => {
+    assert.doesNotMatch(svg, /rotate\(90\)/);
+    await view.width(240).runAsync();
+    assert.match(await view.toSVG(), /rotate\(90\)/);
+  });
 });
 
 test('unsupported charts and missing result fields still fall back to rows', () => {
@@ -539,4 +626,35 @@ test('unsupported charts and missing result fields still fall back to rows', () 
     ok: false,
     refusal: { reason: 'fieldNotInResult', fieldName: 'sellingprice' },
   });
+});
+
+test('equivalent typed categories and color values share their domain label without losing marks', async () => {
+  const chart = chartFor(seriesPlan(undefined, undefined, schema), [
+    { sellingprice: '002', count: 3, series: 'Alpha' },
+    { sellingprice: 2, count: 4, series: 'Beta' },
+  ]);
+  assert.deepEqual(chart.encoding.x.scale.domain, ['002']);
+  assert.deepEqual(
+    chart.data.values.map(({ x }) => x),
+    ['002', '002'],
+  );
+  await render(chart, (view, svg) => {
+    assert.ok(view.scale('y').domain().at(-1) >= 7);
+    assert.match(svg, /Count|count/);
+  });
+});
+
+test('ordinary numeric axis ticks do not use scientific notation', async () => {
+  await render(chartFor(planFor(), [{ sellingprice: 1, count: 213 }]), (_view, svg) => {
+    assert.match(svg, />200<\/text>/);
+    assert.doesNotMatch(svg, />[12]e\+2<\/text>/);
+  });
+});
+
+test('all-missing measures render without invalid scale domains or fake zeros', async () => {
+  for (const plan of [planFor(), seriesPlan(), piePlan()]) {
+    const chart = chartFor(plan, [{ sellingprice: 'A', count: null, series: 'Alpha' }]);
+    assert.equal(chart.data.values[0].y, null);
+    await render(chart);
+  }
 });

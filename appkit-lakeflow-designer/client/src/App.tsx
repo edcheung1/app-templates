@@ -989,7 +989,7 @@ function ResultSection({ payload, chartSpec }: { payload: OkPayload; chartSpec?:
         <TruncatedChartWarning truncated={payload.truncated} />
         <div className="px-6 py-4">
           <Suspense fallback={<p className="text-muted-foreground py-8 text-center text-sm">Loading chart…</p>}>
-            <LazyOutputChart plan={chart.plan} rows={payload.rows} />
+            <LazyOutputChart plan={chart.plan} rows={payload.rows} fallback={<ResultGrid payload={payload} />} />
           </Suspense>
         </div>
         <ResultFooter payload={payload} />

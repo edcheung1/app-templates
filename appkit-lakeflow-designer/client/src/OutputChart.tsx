@@ -1,65 +1,88 @@
-import {
-  AreaChart,
-  BarChart,
-  LineChart,
-  PieChart,
-  useChartUITokens,
-  useThemeColors,
-} from '@databricks/appkit-ui/react';
+import { useChartUITokens } from '@databricks/appkit-ui/react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import embed from 'vega-embed';
 
-import { buildPublishedChartOptions } from './chartOptions';
+import { buildPublishedVegaLiteSpec, DESIGNER_CHART_COLORS } from './chartSpec';
 import { preparePublishedChartData } from './chartData';
 import type { PublishedChartPlan, PublishedChartRow } from './chartTranslation';
 
-const CHART_HEIGHT = 260;
-
-export function OutputChart({
-  plan,
-  rows,
-}: {
+export interface OutputChartProps {
   plan: PublishedChartPlan;
   rows: readonly PublishedChartRow[];
-}) {
-  const colors = useThemeColors();
+  fallback: ReactNode;
+}
+
+export function OutputChart({ plan, rows, fallback }: OutputChartProps) {
   const ui = useChartUITokens();
-  const chartData = preparePublishedChartData(plan, rows);
-  const { data, yKeys } = chartData;
-  const options = buildPublishedChartOptions(plan, chartData, colors, ui);
-
-  if (plan.component === 'pie') {
-    return (
-      <div data-testid="output-chart">
-        <PieChart
-          data={data}
-          xKey={plan.xKey}
-          yKey={plan.yKey}
-          title={plan.title}
-          ariaLabel={plan.title ?? plan.yTitle}
-          height={CHART_HEIGHT}
-          showLegend
-          options={options}
-        />
-      </div>
+  const host = useRef<HTMLDivElement>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const container = host.current;
+    if (!container) return;
+    setFailed(false);
+    // An embed may finish after cleanup. Its own mount keeps it away from a newer chart.
+    const mount = document.createElement('div');
+    container.appendChild(mount);
+    const spec = buildPublishedVegaLiteSpec(
+      plan,
+      preparePublishedChartData(plan, rows),
+      DESIGNER_CHART_COLORS,
+      ui,
+      getComputedStyle(container).fontFamily,
     );
-  }
-
-  const props = {
-    data,
-    xKey: plan.xKey,
-    yKey: yKeys.length === 1 ? yKeys[0] : yKeys,
-    height: CHART_HEIGHT,
-    showLegend: yKeys.length > 1,
-    orientation: plan.orientation,
-    title: plan.title,
-    ariaLabel: plan.title ?? `${plan.yTitle} by ${plan.xTitle}`,
-    options,
-  };
+    let disposed = false;
+    let finalize: (() => void) | undefined;
+    let observer: ResizeObserver | undefined;
+    let width = Math.max(1, container.clientWidth);
+    const onError = () => {
+      if (!disposed) setFailed(true);
+    };
+    void embed(mount, spec, {
+      actions: false,
+      renderer: 'svg',
+      width,
+    })
+      .then((result) => {
+        if (disposed) {
+          result.finalize();
+          return;
+        }
+        finalize = result.finalize;
+        observer = new ResizeObserver(() => {
+          const nextWidth = container.clientWidth;
+          if (nextWidth > 0 && nextWidth !== width) {
+            width = nextWidth;
+            void result.view.width(width).runAsync().catch(onError);
+          }
+        });
+        observer.observe(container);
+      })
+      .catch(onError);
+    return () => {
+      disposed = true;
+      observer?.disconnect();
+      finalize?.();
+      mount.remove();
+    };
+  }, [plan, rows, ui]);
 
   return (
-    <div data-testid="output-chart">
-      {plan.component === 'bar' ? <BarChart {...props} /> : null}
-      {plan.component === 'line' ? <LineChart {...props} /> : null}
-      {plan.component === 'area' ? <AreaChart {...props} /> : null}
-    </div>
+    <>
+      <div
+        ref={host}
+        className="min-w-0 w-full"
+        hidden={failed}
+        aria-label={plan.title ?? `${plan.yTitle} by ${plan.xTitle}`}
+        data-testid="output-chart"
+      />
+      {failed ? (
+        <>
+          <p role="alert" className="text-muted-foreground text-sm">
+            This chart could not be rendered. Its rows are shown instead.
+          </p>
+          {fallback}
+        </>
+      ) : null}
+    </>
   );
 }
