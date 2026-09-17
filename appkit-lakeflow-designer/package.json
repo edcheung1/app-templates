@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Published Designer app",
   "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "build": "npm run build:server && npm run build:client",
     "build:server": "tsc -b tsconfig.server.json && tsdown -c tsdown.server.config.ts",
     "build:client": "tsc -b tsconfig.client.json && vite build --config client/vite.config.ts",

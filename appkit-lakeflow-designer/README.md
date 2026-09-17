@@ -32,3 +32,17 @@ Per-app differences are injected at deploy time rather than baked into the sourc
     npm run build   # build:server (tsc -b + tsdown -> dist/server.js) + build:client (vite -> client/dist)
     npm run typecheck
     npm start       # node ./dist/server.js
+
+## Chart rendering
+
+Published charts use AppKit's themed option builders with the Designer spec's axis roles,
+titles, and line shape. Bars with a categorical X axis stay vertical; bars with a categorical
+Y axis stay horizontal. Numeric and temporal X axes use continuous coordinates. Category labels
+and supplied row order are preserved rather than inferred from their values.
+
+This is not a full Designer visualization renderer. Advanced sorting, aggregation, layouts,
+formatting, and chart types still need additional support. Unsupported chart types fall back
+to the result table.
+
+Run `npm test` with Node 22.18+ to check chart translation and the real AppKit-generated options.
+The tests use the existing bundler; no browser or additional test dependencies are required.

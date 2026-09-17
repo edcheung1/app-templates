@@ -23,15 +23,18 @@ export interface PublishedChartPlan {
   component: PublishedChartComponent;
   xKey: string;
   yKey: string;
+  orientation: 'vertical' | 'horizontal';
+  xType: PublishedChartFieldType;
+  title?: string;
+  lineShape: 'linear' | 'smooth' | 'step';
 
-  // The old long-format `color` channel. appkit draws series wide-format, so when this is set the
+  // The long-format `color` channel. AppKit draws series wide-format, so when this is set the
   // rows are pivoted to one column per series value before charting.
   seriesKey?: string;
   xTitle: string;
   yTitle: string;
 
-  // Which columns to convert before charting: JSON rows carry temporal and quantitative values as
-  // strings, and appkit infers each axis type from the values it is given.
+  // JSON rows carry temporal and quantitative values as strings; decode them before charting.
   coercions: PublishedChartCoercion[];
 }
 
@@ -51,7 +54,7 @@ const CARTESIAN: ReadonlyMap<string, 'bar' | 'line' | 'area'> = new Map([
   ['area', 'area'],
 ]);
 
-// Derive field roles from the payload's Spark schema, not render-spec scale hints.
+// Used only when the chart has no explicit scale; numeric columns can be plotted as categories.
 function fieldTypeOf(sparkType: string): PublishedChartFieldType {
   const type = sparkType.trim().toLowerCase();
   if (type === 'date' || type.startsWith('timestamp') || type === 'datetime') {
@@ -89,7 +92,7 @@ interface Bound {
 function channelOf(
   chartSpec: PublishedChartSpecInput,
   channel: string,
-): { fieldName: string; title: string } | undefined {
+): { fieldName: string; title: string; type?: PublishedChartFieldType } | undefined {
   const encodings = chartSpec.encodings;
   if (!isRecord(encodings)) {
     return undefined;
@@ -100,8 +103,24 @@ function channelOf(
   }
 
   const displayName =
-    typeof encoding.displayName === 'string' && encoding.displayName !== '' ? encoding.displayName : undefined;
-  return { fieldName: encoding.fieldName, title: displayName ?? encoding.fieldName };
+    typeof encoding.displayName === 'string' && encoding.displayName !== ''
+      ? encoding.displayName
+      : undefined;
+  const axis = isRecord(encoding.axis) ? encoding.axis : undefined;
+  const title =
+    axis?.hideTitle === true
+      ? ''
+      : typeof axis?.title === 'string'
+        ? axis.title
+        : (displayName ?? encoding.fieldName);
+  const scale = isRecord(encoding.scale) ? encoding.scale.type : undefined;
+  const type =
+    scale === 'categorical'
+      ? 'nominal'
+      : scale === 'quantitative' || scale === 'temporal'
+        ? scale
+        : undefined;
+  return { fieldName: encoding.fieldName, title, type };
 }
 
 function bindChannel(
@@ -120,7 +139,11 @@ function bindChannel(
   }
   return {
     ok: true,
-    bound: { field: declared.fieldName, type: overrideType ?? fieldTypeOf(field.type), title: declared.title },
+    bound: {
+      field: declared.fieldName,
+      type: overrideType ?? declared.type ?? fieldTypeOf(field.type),
+      title: declared.title,
+    },
   };
 }
 
@@ -143,6 +166,10 @@ export function translatePublishedChart({
   chartSpec: PublishedChartSpecInput;
   schema: readonly PublishedChartField[];
 }): PublishedChartTranslation {
+  const frame = isRecord(chartSpec.frame) ? chartSpec.frame : undefined;
+  const title = frame?.showTitle === true && typeof frame.title === 'string' ? frame.title : undefined;
+  const mark = isRecord(chartSpec.mark) ? chartSpec.mark : undefined;
+  const lineShape = mark?.lineShape === 'smooth' || mark?.lineShape === 'step' ? mark.lineShape : 'linear';
   const cartesian = CARTESIAN.get(chartSpec.widgetType);
   if (cartesian !== undefined) {
     const x = bindChannel(chartSpec, 'x', schema);
@@ -163,12 +190,18 @@ export function translatePublishedChart({
     if (!color.ok && color.refusal.reason !== 'missingChannel') {
       return color;
     }
+    const horizontal = cartesian === 'bar' && x.bound.type === 'quantitative' && y.bound.type === 'nominal';
     return {
       ok: true,
       plan: {
         component: cartesian,
-        xKey: x.bound.field,
-        yKey: y.bound.field,
+        // AppKit always takes the dimension as xKey, including for horizontal bars.
+        xKey: horizontal ? y.bound.field : x.bound.field,
+        yKey: horizontal ? x.bound.field : y.bound.field,
+        orientation: horizontal ? 'horizontal' : 'vertical',
+        xType: x.bound.type,
+        title,
+        lineShape,
         ...(color.ok ? { seriesKey: color.bound.field } : {}),
         xTitle: x.bound.title,
         yTitle: y.bound.title,
@@ -196,6 +229,10 @@ export function translatePublishedChart({
         component: 'pie',
         xKey: color.bound.field,
         yKey: angle.bound.field,
+        orientation: 'vertical',
+        xType: color.bound.type,
+        title,
+        lineShape,
         xTitle: color.bound.title,
         yTitle: angle.bound.title,
         coercions: coercionsOf(angle.bound),

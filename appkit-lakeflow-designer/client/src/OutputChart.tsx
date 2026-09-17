@@ -1,5 +1,13 @@
-import { AreaChart, BarChart, LineChart, PieChart } from '@databricks/appkit-ui/react';
+import {
+  AreaChart,
+  BarChart,
+  LineChart,
+  PieChart,
+  useChartUITokens,
+  useThemeColors,
+} from '@databricks/appkit-ui/react';
 
+import { buildPublishedChartOptions } from './chartOptions';
 import type { PublishedChartCoercion, PublishedChartPlan, PublishedChartRow } from './chartTranslation';
 
 const CHART_HEIGHT = 260;
@@ -20,8 +28,8 @@ function coerce(value: unknown, to: 'number' | 'date'): unknown {
   return Number.isNaN(asDate.getTime()) ? null : asDate;
 }
 
-// JSON rows carry temporal and quantitative columns as strings; appkit reads each axis type off the
-// values, so convert those columns to Date and number before handing the rows over.
+// JSON rows carry temporal and quantitative columns as strings; decode only the columns the
+// chart uses as dates or measures, preserving numeric-looking category labels.
 function coerceRows(
   rows: readonly PublishedChartRow[],
   coercions: readonly PublishedChartCoercion[],
@@ -78,13 +86,29 @@ function pivotSeries(
   return { data: [...byX.values()], yKeys };
 }
 
-export function OutputChart({ plan, rows }: { plan: PublishedChartPlan; rows: readonly PublishedChartRow[] }) {
+export function OutputChart({
+  plan,
+  rows,
+}: {
+  plan: PublishedChartPlan;
+  rows: readonly PublishedChartRow[];
+}) {
+  const colors = useThemeColors();
+  const ui = useChartUITokens();
   const data = coerceRows(rows, plan.coercions);
 
   if (plan.component === 'pie') {
     return (
       <div data-testid="output-chart">
-        <PieChart data={data} xKey={plan.xKey} yKey={plan.yKey} height={CHART_HEIGHT} showLegend />
+        <PieChart
+          data={data}
+          xKey={plan.xKey}
+          yKey={plan.yKey}
+          title={plan.title}
+          ariaLabel={plan.title ?? plan.yTitle}
+          height={CHART_HEIGHT}
+          showLegend
+        />
       </div>
     );
   }
@@ -100,6 +124,10 @@ export function OutputChart({ plan, rows }: { plan: PublishedChartPlan; rows: re
     yKey: yKeys.length === 1 ? yKeys[0] : yKeys,
     height: CHART_HEIGHT,
     showLegend: yKeys.length > 1,
+    orientation: plan.orientation,
+    title: plan.title,
+    ariaLabel: plan.title ?? `${plan.yTitle} by ${plan.xTitle}`,
+    options: buildPublishedChartOptions(plan, chartData, yKeys, colors, ui),
   };
 
   return (
