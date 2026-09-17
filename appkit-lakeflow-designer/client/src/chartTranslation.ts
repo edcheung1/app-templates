@@ -19,6 +19,18 @@ export interface PublishedChartCoercion {
   to: 'number' | 'date';
 }
 
+export type PublishedChartSort =
+  | { by: 'natural-order' | 'natural-order-reversed' | 'original-order' | 'original-order-reversed' }
+  | { by: 'custom-order'; orderedValues: unknown[] }
+  | { by: 'measure' | 'measure-reversed'; field: string };
+
+export interface PublishedChartDomain {
+  field: string;
+  // Compare categories using the column's data type, not its (categorical) scale type.
+  valueType: PublishedChartFieldType | 'boolean';
+  sort: PublishedChartSort;
+}
+
 export interface PublishedChartPlan {
   component: PublishedChartComponent;
   xKey: string;
@@ -28,9 +40,9 @@ export interface PublishedChartPlan {
   title?: string;
   lineShape: 'linear' | 'smooth' | 'step';
 
-  // The long-format `color` channel. AppKit draws series wide-format, so when this is set the
-  // rows are pivoted to one column per series value before charting.
-  seriesKey?: string;
+  dimension?: PublishedChartDomain;
+  // The long-format color channel is sorted before pivoting to AppKit's wide-format series.
+  series?: PublishedChartDomain;
   xTitle: string;
   yTitle: string;
 
@@ -42,6 +54,7 @@ export type PublishedChartRefusal =
   | { reason: 'unsupportedWidgetType'; widgetType: string }
   | { reason: 'missingChannel'; channel: string }
   | { reason: 'fieldNotInResult'; fieldName: string }
+  | { reason: 'unsupportedSort'; fieldName: string }
   | { reason: 'noMeasure'; fieldNames: string[] };
 
 export type PublishedChartTranslation =
@@ -87,12 +100,14 @@ interface Bound {
   field: string;
   type: PublishedChartFieldType;
   title: string;
+  valueType: PublishedChartDomain['valueType'];
+  sort: unknown;
 }
 
 function channelOf(
   chartSpec: PublishedChartSpecInput,
   channel: string,
-): { fieldName: string; title: string; type?: PublishedChartFieldType } | undefined {
+): { fieldName: string; title: string; type?: PublishedChartFieldType; sort: unknown } | undefined {
   const encodings = chartSpec.encodings;
   if (!isRecord(encodings)) {
     return undefined;
@@ -120,7 +135,12 @@ function channelOf(
       : scale === 'quantitative' || scale === 'temporal'
         ? scale
         : undefined;
-  return { fieldName: encoding.fieldName, title, type };
+  return {
+    fieldName: encoding.fieldName,
+    title,
+    type,
+    sort: isRecord(encoding.scale) ? encoding.scale.sort : undefined,
+  };
 }
 
 function bindChannel(
@@ -143,8 +163,75 @@ function bindChannel(
       field: declared.fieldName,
       type: overrideType ?? declared.type ?? fieldTypeOf(field.type),
       title: declared.title,
+      valueType: field.type.trim().toLowerCase() === 'boolean' ? 'boolean' : fieldTypeOf(field.type),
+      sort: declared.sort,
     },
   };
+}
+
+function categoricalDomainOf(
+  bound: Bound,
+  chartSpec: PublishedChartSpecInput,
+  schema: readonly PublishedChartField[],
+  defaultSort: PublishedChartSort = { by: 'natural-order' },
+): { ok: true; domain?: PublishedChartDomain } | { ok: false; refusal: PublishedChartRefusal } {
+  if (bound.type !== 'nominal') {
+    return { ok: true };
+  }
+  const domain = (sort: PublishedChartSort) => ({
+    ok: true as const,
+    domain: { field: bound.field, valueType: bound.valueType, sort },
+  });
+  if (bound.sort === undefined || bound.sort === null) {
+    return domain(defaultSort);
+  }
+  const sort = isRecord(bound.sort) ? bound.sort : {};
+  switch (sort.by) {
+    case 'natural-order':
+    case 'natural-order-reversed':
+    case 'original-order':
+    case 'original-order-reversed':
+      return domain({ by: sort.by });
+    case 'custom-order':
+      if (Array.isArray(sort.orderedValues)) {
+        return domain({ by: sort.by, orderedValues: sort.orderedValues });
+      }
+      break;
+    case 'x':
+    case 'x-reversed':
+    case 'y':
+    case 'y-reversed':
+    case 'angle':
+    case 'angle-reversed': {
+      const measure = bindChannel(chartSpec, sort.by.replace('-reversed', ''), schema);
+      if (!measure.ok) {
+        return measure;
+      }
+      if (measure.bound.type === 'quantitative') {
+        return domain({
+          by: sort.by.endsWith('-reversed') ? 'measure-reversed' : 'measure',
+          field: measure.bound.field,
+        });
+      }
+      break;
+    }
+    case 'measure':
+    case 'measure-reversed': {
+      const fieldName = isRecord(sort.measure) ? sort.measure.fieldName : undefined;
+      if (typeof fieldName !== 'string') {
+        break;
+      }
+      const field = schema.find((candidate) => candidate.name === fieldName);
+      if (field === undefined) {
+        return { ok: false, refusal: { reason: 'fieldNotInResult', fieldName } };
+      }
+      if (fieldTypeOf(field.type) === 'quantitative') {
+        return domain({ by: sort.by, field: fieldName });
+      }
+      break;
+    }
+  }
+  return { ok: false, refusal: { reason: 'unsupportedSort', fieldName: bound.field } };
 }
 
 function coercionsOf(...bounds: Bound[]): PublishedChartCoercion[] {
@@ -191,6 +278,14 @@ export function translatePublishedChart({
       return color;
     }
     const horizontal = cartesian === 'bar' && x.bound.type === 'quantitative' && y.bound.type === 'nominal';
+    const dimension = categoricalDomainOf(horizontal ? y.bound : x.bound, chartSpec, schema);
+    if (!dimension.ok) {
+      return dimension;
+    }
+    const series = color.ok ? categoricalDomainOf(color.bound, chartSpec, schema) : undefined;
+    if (series && !series.ok) {
+      return series;
+    }
     return {
       ok: true,
       plan: {
@@ -202,7 +297,8 @@ export function translatePublishedChart({
         xType: x.bound.type,
         title,
         lineShape,
-        ...(color.ok ? { seriesKey: color.bound.field } : {}),
+        dimension: dimension.domain,
+        series: series?.domain,
         xTitle: x.bound.title,
         yTitle: y.bound.title,
         coercions: coercionsOf(x.bound, y.bound),
@@ -223,6 +319,13 @@ export function translatePublishedChart({
     if (!color.ok) {
       return color;
     }
+    const dimension = categoricalDomainOf(color.bound, chartSpec, schema, {
+      by: 'measure-reversed',
+      field: angle.bound.field,
+    });
+    if (!dimension.ok) {
+      return dimension;
+    }
     return {
       ok: true,
       plan: {
@@ -233,6 +336,7 @@ export function translatePublishedChart({
         xType: color.bound.type,
         title,
         lineShape,
+        dimension: dimension.domain,
         xTitle: color.bound.title,
         yTitle: angle.bound.title,
         coercions: coercionsOf(angle.bound),
@@ -250,7 +354,9 @@ export function describePublishedChartRefusal(refusal: PublishedChartRefusal): s
     case 'missingChannel':
       return `This output's chart has no ${refusal.channel} column configured, so it cannot be drawn. Its rows are shown instead.`;
     case 'fieldNotInResult':
-      return `This output's chart plots a column called "${refusal.fieldName}", which the run did not return. Its rows are shown instead.`;
+      return `This output's chart uses a column called "${refusal.fieldName}", which the run did not return. Its rows are shown instead.`;
+    case 'unsupportedSort':
+      return `This output's chart uses an unsupported sort for "${refusal.fieldName}". Its rows are shown instead.`;
     case 'noMeasure':
       return `This output's chart has nothing numeric to measure (${refusal.fieldNames.join(', ')}), so it cannot be drawn. Its rows are shown instead.`;
   }

@@ -38,11 +38,21 @@ Per-app differences are injected at deploy time rather than baked into the sourc
 Published charts use AppKit's themed option builders with the Designer spec's axis roles,
 titles, and line shape. Bars with a categorical X axis stay vertical; bars with a categorical
 Y axis stay horizontal. Numeric and temporal X axes use continuous coordinates. Category labels
-and supplied row order are preserved rather than inferred from their values.
+are preserved rather than inferred from their values.
 
-This is not a full Designer visualization renderer. Advanced sorting, aggregation, layouts,
-formatting, and chart types still need additional support. Unsupported chart types fall back
-to the result table.
+Categorical axes and series honor `scale.sort`: natural/reversed, original/reversed, custom lists,
+and sorting by X, Y, angle, or a numeric measure present in the result. With no explicit sort,
+categories use Designer's schema-aware natural order (lexicographic for strings, numeric for
+numbers); pie slices default to descending angle totals. Unlisted custom-order values follow in
+natural order. Measure-based sorting ranks category totals before pivoting series, keeping data
+aligned and category colors stable across explicit sort changes. Horizontal categories read
+top to bottom. Continuous X coordinates remain ascending.
+
+This is not a full Designer visualization renderer. Measure sorting uses sums of the returned
+rows: the published result does not include Designer's column-transform metadata or separate
+grouping results needed for more advanced aggregation semantics, such as custom MIN/MAX sorts.
+Layouts, formatting, and additional chart types still need support. Unsupported chart types,
+unrecognized sort settings, and missing sort fields fall back to the result table.
 
 Run `npm test` with Node 22.18+ to check chart translation and the real AppKit-generated options.
 The tests use the existing bundler; no browser or additional test dependencies are required.
