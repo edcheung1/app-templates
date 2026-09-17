@@ -75,4 +75,8 @@ The renderer pins [Vega](https://github.com/vega/vega) 6.2.0,
 [Vega-Lite](https://github.com/vega/vega-lite) 6.4.3, and
 [Vega Embed](https://github.com/vega/vega-embed) 7.0.2. All three use the BSD-3-Clause license;
 the lockfile records package integrity hashes. Installs during development use the internal
-package proxy. The manifest and runner-job contracts are unchanged.
+package proxy, but the committed lockfile must use `https://registry.npmjs.org/` for all
+package URLs so published apps do not depend on corporate network access. After dependency
+updates, normalize any proxy URLs in the lockfile without changing versions or integrity
+hashes; changing npm's registry setting alone does not rewrite existing lockfile URLs.
+The manifest and runner-job contracts are unchanged.
