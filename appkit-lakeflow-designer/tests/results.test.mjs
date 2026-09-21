@@ -12,6 +12,7 @@ let parseRunOutcome;
 let ResultFooter;
 let ResultGrid;
 let outputDirectory;
+const ROW_COUNTS_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.row-counts+json';
 
 before(async () => {
   // Keep React and AppKit resolvable from the generated modules without copying dependencies.
@@ -48,6 +49,10 @@ function displayTable(rowCount, overflow) {
     data: Array.from({ length: rowCount }, (_, i) => [i]),
     ...(overflow === undefined ? {} : { overflow }),
   };
+}
+
+function rowCounts(node, counts) {
+  return { type: 'mimeBundle', data: { [ROW_COUNTS_MIME_TYPE]: { node, counts } } };
 }
 
 function notebookHtml(commands) {
@@ -181,6 +186,55 @@ test('renders a separately supplied exact total without downloading those rows',
   assert.equal(payload.rows.length, 1000);
   assert.equal(payload.total_row_count, 558837);
   assert.match(footer(payload), /1,000 \/ 558,837 rows/);
+});
+
+test('reads exact per-port totals from the runner count metadata without shifting table results', () => {
+  const html = notebookHtml([
+    {
+      command: 'display(ctx["filter.filtered_data"])\ndisplay(ctx["filter.excluded_data"])',
+      results: {
+        data: [
+          rowCounts('filter', { filtered_data: 558837, excluded_data: 12 }),
+          displayTable(1000, true),
+          displayTable(12, false),
+        ],
+      },
+    },
+  ]);
+
+  const outputs = JSON.parse(exportedModelToRunPayload(html)).outputs;
+  assert.deepEqual(
+    outputs.map(({ target_port, rows, total_row_count }) => ({
+      target_port,
+      rows: rows.length,
+      total_row_count,
+    })),
+    [
+      { target_port: 'filtered_data', rows: 1000, total_row_count: 558837 },
+      { target_port: 'excluded_data', rows: 12, total_row_count: 12 },
+    ],
+  );
+  assert.match(footer(parsePayload(outputs[0])), /1,000 \/ 558,837 rows/);
+});
+
+test('ignores malformed count metadata and preserves the preview completeness signal', () => {
+  for (const marker of [
+    rowCounts('', { data: 50 }),
+    rowCounts('source_0', {}),
+    rowCounts('source_0', { data: -1 }),
+    rowCounts('source_0', { data: 1.5 }),
+    rowCounts('source_0', { data: '50' }),
+  ]) {
+    const html = notebookHtml([
+      {
+        command: 'display(ctx["source_0.data"])',
+        results: { data: [displayTable(10, true), marker] },
+      },
+    ]);
+    const output = JSON.parse(exportedModelToRunPayload(html)).outputs[0];
+    assert.equal(output.total_row_count, undefined);
+    assert.equal(output.truncated, true);
+  }
 });
 
 test('rejects impossible or unsafe totals instead of labeling a truncated preview as complete', () => {
