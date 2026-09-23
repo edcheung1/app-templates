@@ -136,8 +136,9 @@ New uploads in automatically provisioned volumes use
 `/Volumes/<catalog>/<schema>/designer_<app-id>/<viewer-hash>/<parameter-hash>/<upload-id>/<filename>`.
 Shared volumes retain the `designer_uploads/<app-id>` prefix. Deploy this template's compact-path
 reader before publishing manifests with the shorter upload root. Existing files are not moved;
-viewers upload a new file after the app adopts the shorter root. Restart the app if its Files plugin
-was already initialized with the previous root before republishing.
+viewers upload a new file after the app adopts the shorter root. The Files plugin refreshes its
+path policy when the manifest prefix changes within the same volume; no restart is needed.
+Replacing the bound volume remains unsupported.
 
 `npm test` covers storage completion/partial failures, limits, parameter resolution and ownership
 policy with an in-memory storage boundary, plus server-route access checks and history hydration.

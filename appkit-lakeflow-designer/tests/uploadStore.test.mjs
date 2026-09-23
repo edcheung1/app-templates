@@ -160,7 +160,30 @@ test('limits plugin access to the configured app storage', async () => {
     status: 502,
   });
   await assert.rejects(appKitUploadStore(undefined).read(`${config.path}/file`), { status: 409 });
-  await assert.rejects(appKitUploadStore({ ...config, path: `${config.path}2` }).read(`${config.path}2/file`), {
-    status: 409,
-  });
+  await assert.rejects(
+    appKitUploadStore({ ...config, volume: `${config.volume}2`, path: `${config.path}2` }).read(`${config.path}2/file`),
+    { status: 409 },
+  );
+});
+
+test('allows republishing a shorter prefix without changing the volume or sharing plugin policies', async () => {
+  const previous = { ...config, path: `${config.path}/designer_uploads/app1` };
+  const previousStore = appKitUploadStore(previous);
+  const store = appKitUploadStore(config);
+  const beforePath = `${previous.path}/viewer/parameter/before.csv`;
+  const afterPath = `${config.path}/viewer/parameter/after.csv`;
+
+  await previousStore.put(beforePath, Buffer.from('before'));
+  await store.put(afterPath, Buffer.from('after'));
+  assert.equal(contents.get(beforePath).toString(), 'before');
+  assert.equal(contents.get(afterPath).toString(), 'after');
+
+  // In-flight requests keep their own scope even after another request reads the new manifest.
+  await assert.rejects(previousStore.read(afterPath), { status: 502 });
+  await Promise.all([
+    previousStore.put(`${previous.path}/viewer/concurrent.csv`, Buffer.from('previous scope')),
+    store.put(`${config.path}/viewer/concurrent.csv`, Buffer.from('current scope')),
+  ]);
+  assert.equal(contents.get(`${previous.path}/viewer/concurrent.csv`).toString(), 'previous scope');
+  assert.equal(contents.get(`${config.path}/viewer/concurrent.csv`).toString(), 'current scope');
 });
