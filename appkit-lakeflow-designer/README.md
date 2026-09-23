@@ -16,6 +16,9 @@ Per-app differences are injected at deploy time rather than baked into the sourc
 
 - `server/server.ts` — the Node/AppKit server (TypeScript). Type-checked and bundled by
   `build:server` (`tsc -b` + `tsdown`) to `dist/server.js`, which `start` runs.
+- `server/uploads.ts` / `server/exports.ts` — upload and on-demand export routes. Their store
+  adapters share AppKit volume setup and SDK normalization in `server/storageVolume.ts`, with
+  separate upload/export subtree policies, caches, and error handling.
 - `client/` — the React client, built by Vite to `client/dist`.
 - `app.yaml` — start command and env bindings (`command: ['npm', 'run', 'start']`).
 - `tsconfig.shared.json` / `tsconfig.server.json` / `tsconfig.client.json` — a strict shared base

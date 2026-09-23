@@ -1,15 +1,10 @@
 import { createApp, createWorkspaceClient, server } from '@databricks/appkit';
 import { exportedModelToRunPayload, findNotebookModelValue } from './exportedRunOutput';
 import type { Request } from 'express';
-import { Readable } from 'node:stream';
-import { MAX_UPLOAD_SIZE_LABEL, parseAppStorage, UPLOAD_REFERENCE, type AppStorage } from '../shared/storageConfig';
-import {
-  UploadError,
-  canAccessRun,
-  saveUploadStream,
-  viewerKey,
-} from './fileUploads';
+import { parseAppStorage, UPLOAD_REFERENCE, type AppStorage } from '../shared/storageConfig';
+import { canAccessRun, viewerKey } from './fileUploads';
 import { appKitUploadStore } from './uploadStore';
+import { registerUploadRoutes } from './uploads';
 import { isReservedParameter, resolveRunParameters } from './runParameters';
 import { isExportRun, manifestRevision, registerExportRoutes } from './exports';
 import { appKitExportStore } from './exportStore';
@@ -759,8 +754,6 @@ function resolveHistoryWindow(raw: unknown) {
   return Math.min(parsed, RUN_HISTORY_MAX_WINDOW);
 }
 
-let activeUploads = 0;
-
 await createApp({
   plugins: [server()],
   onPluginsReady: async (appkit) => {
@@ -797,66 +790,10 @@ await createApp({
         report: (error) => console.error('Export request failed', error),
       });
 
-      app.post('/api/designer/uploads/:parameterName', async (req, res) => {
-        let admitted = false;
-        try {
-          const manifest = await loadManifest(true);
-          const parameter = manifest?.parameters.find(
-            ({ name, type }) => name === req.params.parameterName && type === 'file',
-          );
-          if (!parameter || !manifest?.storage) {
-            res.status(404).json({ error: 'This app has no such file parameter.' });
-            return;
-          }
-          const viewer = requestViewer(req);
-          if (!viewer) {
-            res.status(401).json({ error: 'Sign in through Databricks Apps to upload files.' });
-            return;
-          }
-          const store = appKitUploadStore(manifest.storage);
-          if (req.get('content-type') !== 'application/octet-stream')
-            throw new UploadError(415, 'Upload the file as an octet stream.');
-          if (activeUploads >= 4) throw new UploadError(429, 'Uploads are busy. Try again shortly.');
-          const contentLength = req.get('content-length');
-          if (contentLength !== undefined && !/^\d+$/.test(contentLength))
-            throw new UploadError(400, 'The Content-Length header is invalid.');
-          const declaredSize = contentLength === undefined ? undefined : Number(contentLength);
-          if (declaredSize !== undefined && declaredSize > manifest.storage.maxUploadFileSizeBytes)
-            throw new UploadError(413, `The file exceeds the ${MAX_UPLOAD_SIZE_LABEL} upload limit.`);
-          let filename: string;
-          try {
-            filename = decodeURIComponent(req.get('x-file-name') ?? '');
-          } catch {
-            throw new UploadError(400, 'The filename is invalid.');
-          }
-          activeUploads += 1;
-          admitted = true;
-          res
-            .status(201)
-            .json({
-              upload: await saveUploadStream(
-                store,
-                manifest.storage,
-                viewer,
-                parameter.name,
-                filename,
-                Readable.toWeb(req) as ReadableStream<Uint8Array>,
-                declaredSize,
-              ),
-            });
-        } catch (error) {
-          req.resume();
-          res
-            .status(error instanceof UploadError ? error.status : 502)
-            .json({
-              error:
-                error instanceof UploadError
-                  ? error.message
-                  : 'Could not store the upload. Check the app volume resource and permissions.',
-            });
-        } finally {
-          if (admitted) activeUploads -= 1;
-        }
+      registerUploadRoutes(app, {
+        manifest: () => loadManifest(true),
+        viewer: requestViewer,
+        store: appKitUploadStore,
       });
 
       app.get('/api/designer/config', async (_req, res) => {
