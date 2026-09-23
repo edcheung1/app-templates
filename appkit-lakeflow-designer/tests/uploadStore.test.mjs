@@ -10,8 +10,8 @@ let outputDirectory, appKitUploadStore;
 const contents = new Map();
 const directories = new Set();
 const config = {
-  volume: 'main.default.uploads',
-  path: '/Volumes/main/default/uploads/designer_uploads/app1',
+  volume: 'main.default.designer_app1',
+  path: '/Volumes/main/default/designer_app1',
   maxFileSizeBytes: 5 * 1024 * 1024 * 1024,
 };
 const originals = Object.fromEntries(

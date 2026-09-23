@@ -31,8 +31,8 @@ after(async () => {
 });
 
 const storage = {
-  volume: 'main.default.uploads',
-  path: '/Volumes/main/default/uploads/designer_uploads/app1',
+  volume: 'main.default.designer_app1',
+  path: '/Volumes/main/default/designer_app1',
   maxFileSizeBytes: 5 * 1024 * 1024 * 1024,
 };
 const fileParameter = { name: 'path', type: 'file', label: 'Data', defaultValue: '/Volumes/private/author.csv' };
@@ -74,6 +74,7 @@ test('saves immutable bytes, resolves an upload after service restart, and isola
   const alice = uploads.viewerKey('alice', '100');
   const saved = await uploads.saveUpload(store, storage, alice, 'path', 'sales.csv', Buffer.from('a,b\n1,2\n'));
   const resolved = await uploads.resolveUpload({ ...store }, storage, alice, 'path', saved.reference);
+  assert.equal(resolved.path.slice(storage.path.length + 1).split('/').length, 4);
   assert.equal(store.files.get(resolved.path).toString(), 'a,b\n1,2\n');
   for (const [owner, name, root] of [
     [uploads.viewerKey('bob', '100'), 'path', storage],
@@ -270,11 +271,15 @@ test('run ownership protects history, results and cancellation even after upload
 
 test('validates versioned storage and never initializes a file input with the author path', () => {
   assert.deepEqual(config.parseUploads(storage), storage);
+  const shared = { ...storage, volume: 'main.default.shared', path: '/Volumes/main/default/shared/designer_uploads/app1' };
+  assert.deepEqual(config.parseUploads(shared), shared);
   for (const invalid of [
     undefined,
     { ...storage, volume: 'a.b' },
     { ...storage, path: '/Volumes/other/default/uploads/designer_uploads/app1' },
     { ...storage, path: storage.path + '/../escape' },
+    { ...storage, path: storage.path + '/' },
+    { ...shared, path: '/Volumes/main/default/shared' },
     { ...storage, maxFileSizeBytes: 5 * 1024 * 1024 * 1024 + 1 },
   ]) {
     assert.equal(config.parseUploads(invalid), undefined);

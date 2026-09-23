@@ -132,7 +132,12 @@ direct Jobs or UC permissions, and volume owners/admins, are outside this in-app
 Files are retained until the volume owner deletes them. There is no automatic expiration, consumer
 delete action, or deletion of storage when an App is deleted. The app does not expose retained files
 for selection; viewers select a local file for each browser session. Manual cleanup must account for queued, running, retrying jobs.
-Storage paths cannot be changed by republishing, so old references stay bound to the same volume.
+New uploads in automatically provisioned volumes use
+`/Volumes/<catalog>/<schema>/designer_<app-id>/<viewer-hash>/<parameter-hash>/<upload-id>/<filename>`.
+Shared volumes retain the `designer_uploads/<app-id>` prefix. Deploy this template's compact-path
+reader before publishing manifests with the shorter upload root. Existing files are not moved;
+viewers upload a new file after the app adopts the shorter root. Restart the app if its Files plugin
+was already initialized with the previous root before republishing.
 
 `npm test` covers storage completion/partial failures, limits, parameter resolution and ownership
 policy with an in-memory storage boundary, plus server-route access checks and history hydration.

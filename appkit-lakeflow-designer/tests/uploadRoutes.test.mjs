@@ -63,8 +63,8 @@ const manifest = {
   version: 4,
   appName: 'Uploads',
   uploads: {
-    volume: 'main.default.uploads',
-    path: '/Volumes/main/default/uploads/designer_uploads/app1',
+    volume: 'main.default.designer_app1',
+    path: '/Volumes/main/default/designer_app1',
     maxFileSizeBytes: 5 * 1024 * 1024 * 1024,
   },
   parameters: [{ name: 'path', label: 'CSV', type: 'file', defaultValue: '/private/author.csv' }],
