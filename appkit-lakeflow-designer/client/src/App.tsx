@@ -381,8 +381,7 @@ export function App() {
     setSelectedEntry(undefined);
     setSelectedRun(undefined);
   };
-  const run = () => {
-
+  const runWithValues = (runValues: Record<string, string>) => {
     formUntouched.current = false;
 
     clearSelection();
@@ -390,8 +389,9 @@ export function App() {
     if (manifest.blocks.some((block) => block.type === 'output' && block.chartSpec !== undefined)) {
       preloadOutputChart();
     }
-    void start(values);
+    void start(runValues);
   };
+  const run = () => runWithValues(values);
   const selectRun = (entry: RunHistoryEntry) => {
 
     if (state.phase === 'settled') {
@@ -505,7 +505,7 @@ export function App() {
             parameters={manifest.parameters}
             values={values}
             onChange={changeValues}
-            onRun={run}
+            onRun={runWithValues}
             running={state.phase === 'running'}
             runnable={runnable}
           />

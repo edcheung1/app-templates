@@ -104,7 +104,7 @@ after(async () => {
   if (outputDirectory) await rm(outputDirectory, { recursive: true });
 });
 
-test('uses the Files plugin for immutable storage, bounded records, metadata, listing and deletion', async () => {
+test('uses the Files plugin for immutable storage, bounded records, metadata and deletion', async () => {
   const store = appKitUploadStore(config);
   const folder = `${config.path}/viewer/parameter`;
   await store.mkdir(folder);
@@ -125,9 +125,6 @@ test('uses the Files plugin for immutable storage, bounded records, metadata, li
     await assert.rejects(store.put(path, Buffer.from('replacement')), { status: 502 });
     assert.deepEqual(contents.get(path), bytes);
   }
-  assert.deepEqual(await Array.fromAsync(store.list(folder)), [
-    'data.csv', 'data.json', 'data #1?100%.csv.gz', 'carmax_car_prices copy (1).xlsx', 'データ.xlsx',
-  ]);
   await store.delete(`${folder}/data.csv`);
   await assert.rejects(store.read(`${folder}/data.csv`), { status: 404 });
 });

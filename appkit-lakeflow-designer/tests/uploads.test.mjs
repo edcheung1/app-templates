@@ -60,23 +60,18 @@ function memoryStore() {
       return JSON.parse(files.get(path).toString());
     },
     size: async (path) => files.get(path)?.length,
-    list: async function* (folder) {
-      for (const path of files.keys()) if (path.startsWith(`${folder}/`)) yield path.slice(folder.length + 1);
-    },
     delete: async (path) => {
       files.delete(path);
     },
   };
 }
 
-test('saves immutable bytes, reuses an upload after service restart, and isolates viewer/parameter/app', async () => {
+test('saves immutable bytes, resolves an upload after service restart, and isolates viewer/parameter/app', async () => {
   const store = memoryStore();
   const alice = uploads.viewerKey('alice', '100');
   const saved = await uploads.saveUpload(store, storage, alice, 'path', 'sales.csv', Buffer.from('a,b\n1,2\n'));
   const resolved = await uploads.resolveUpload({ ...store }, storage, alice, 'path', saved.reference);
   assert.equal(store.files.get(resolved.path).toString(), 'a,b\n1,2\n');
-  assert.deepEqual(await uploads.listUploads(store, storage, alice, 'path'), [saved]);
-  assert.deepEqual(await uploads.listUploads(store, storage, uploads.viewerKey('bob', '100'), 'path'), []);
   for (const [owner, name, root] of [
     [uploads.viewerKey('bob', '100'), 'path', storage],
     [alice, 'other', storage],
@@ -155,7 +150,6 @@ test('never makes incomplete or changed uploads available', async () => {
   const { path } = await uploads.resolveUpload(store, storage, owner, 'path', saved.reference);
   store.files.set(path, Buffer.from('changed'));
   await assert.rejects(uploads.resolveUpload(store, storage, owner, 'path', saved.reference), /has changed/);
-  assert.deepEqual(await uploads.listUploads(store, storage, owner, 'path'), []);
 });
 
 test('enforces actual streamed byte limits, empty files, interrupted streams and safe filenames', async () => {
@@ -189,7 +183,7 @@ test('enforces actual streamed byte limits, empty files, interrupted streams and
 });
 
 for (const filename of ['data.csv', 'workbook.xlsx', 'workbook.xls', 'data.json', 'data.parquet', 'data.csv.gz', 'データ.xlsx', 'data']) {
-  test(`preserves ${filename}, its bytes and its reference through listing and job parameter resolution`, async () => {
+  test(`preserves ${filename}, its bytes and its reference through job parameter resolution`, async () => {
     const store = memoryStore();
     const viewer = uploads.viewerKey('alice', '100');
     const bytes = Buffer.from([0, 1, 127, 128, 255]);
@@ -197,7 +191,6 @@ for (const filename of ['data.csv', 'workbook.xlsx', 'workbook.xls', 'data.json'
     const resolved = await uploads.resolveUpload({ ...store }, storage, viewer, 'path', saved.reference);
     assert.ok(resolved.path.endsWith(`/${saved.reference.slice('upload:'.length)}/${filename}`));
     assert.deepEqual(store.files.get(resolved.path), bytes);
-    assert.deepEqual(await uploads.listUploads(store, storage, viewer, 'path'), [saved]);
     assert.deepEqual(await parameters.resolveRunParameters(manifest, { path: saved.reference }, viewer, store), {
       ok: true,
       params: {
@@ -219,7 +212,6 @@ test('refuses an upload whose completion record contains an invalid filename', a
   const sidecar = [...store.files.keys()].find((path) => path.endsWith(`/${id}.json`));
   store.files.set(sidecar, Buffer.from(JSON.stringify({ ...saved, filename: '../other.json' })));
   await assert.rejects(uploads.resolveUpload(store, storage, viewer, 'path', saved.reference), /incomplete or unreadable/);
-  assert.deepEqual(await uploads.listUploads(store, storage, viewer, 'path'), []);
 });
 
 test('run ownership protects history, results and cancellation even after upload inputs are removed', () => {
@@ -252,6 +244,9 @@ test('validates versioned storage and never initializes a file input with the au
   assert.equal(parsed.version, 4);
   assert.equal(parsed.parameters[0].defaultValue, '');
   assert.deepEqual(appConfig.initialValuesFor(parsed, { path: '/Volumes/private/file.csv' }), { path: '' });
+  assert.deepEqual(appConfig.initialValuesFor(parsed, { path: 'upload:829dcaa7-e505-49c1-b6d0-73d1841e990a' }), {
+    path: '',
+  });
   assert.equal(appConfig.parseAppManifest({ ...manifest, version: 3 }), undefined);
   assert.equal(appConfig.parseAppManifest({ ...manifest, uploads: undefined }), undefined);
   assert.equal(appConfig.parseAppManifest({ ...manifest, version: 3, uploads: undefined }), undefined);

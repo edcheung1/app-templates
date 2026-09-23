@@ -230,12 +230,6 @@ test('enables plugin storage on republish and binds a completed upload to a run'
   });
   assert.equal(response.status, 201);
   assert.deepEqual(state.apps.map((plugins) => plugins.map(({ name }) => name)), [['server'], ['files']]);
-  const listing = await request('get', '/api/designer/uploads/:parameterName', { params: { parameterName: 'path' } });
-  assert.deepEqual(listing.body.uploads, [response.body.upload]);
-  assert.deepEqual(
-    (await request('get', '/api/designer/uploads/:parameterName', { viewer: 'bob', params: { parameterName: 'path' } })).body.uploads,
-    [],
-  );
   assert.equal((await request('post', '/api/designer/run', { body: { params: { path: response.body.upload.reference } } })).status, 200);
   const submitted = state.submissions.at(-1).notebook_params;
   assert.ok(submitted.path.endsWith(`/${response.body.upload.reference.slice('upload:'.length)}/data.json`));

@@ -46,7 +46,6 @@ export interface UploadStore {
   put(path: string, bytes: Uint8Array): Promise<void>;
   read(path: string): Promise<unknown>;
   size(path: string): Promise<number | undefined>;
-  list(path: string): AsyncIterable<string>;
   delete(path: string): Promise<void>;
 }
 
@@ -145,29 +144,4 @@ export async function saveUpload(
     throw error;
   }
   return upload;
-}
-
-export async function listUploads(
-  store: UploadStore,
-  config: AppUploads,
-  viewer: string,
-  parameterName: string,
-): Promise<StoredUpload[]> {
-  const folder = uploadFolder(config, viewer, parameterName);
-  await store.mkdir(folder);
-  const uploads: StoredUpload[] = [];
-  let scanned = 0;
-  for await (const name of store.list(folder)) {
-    if (++scanned > 400) break;
-    const reference = `upload:${name.replace(/\.json$/, '')}`;
-    if (!name.endsWith('.json') || !UPLOAD_REFERENCE.test(reference)) continue;
-    try {
-      const { upload } = await resolveUpload(store, config, viewer, parameterName, reference);
-      uploads.push(upload);
-    } catch (error) {
-      if (!(error instanceof UploadError) || ![404, 409].includes(error.status)) throw error;
-    }
-    if (uploads.length >= 100) break;
-  }
-  return uploads.sort((a, b) => b.createdAt - a.createdAt);
 }

@@ -1,5 +1,5 @@
 import { CONFIG_ROUTE } from './routes';
-import { parseUploads, UPLOAD_REFERENCE, type AppUploads } from '../../shared/uploadConfig';
+import { parseUploads, type AppUploads } from '../../shared/uploadConfig';
 
 export const APP_MANIFEST_VERSION = 3;
 
@@ -213,7 +213,7 @@ export function initialValuesFor(
   for (const parameter of manifest.parameters) {
     const recorded = lastRunParameters?.[parameter.name];
     if (parameter.type === 'file') {
-      values[parameter.name] = recorded && UPLOAD_REFERENCE.test(recorded) ? recorded : '';
+      values[parameter.name] = '';
       continue;
     }
     values[parameter.name] = recorded === undefined || recorded === '' ? parameter.defaultValue : recorded;

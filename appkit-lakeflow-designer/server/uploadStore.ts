@@ -82,11 +82,6 @@ export function appKitUploadStore(config: AppUploads | undefined): UploadStore {
         const size = typeof contentLength === 'number' ? contentLength : Number(contentLength);
         return Number.isSafeInteger(size) && size >= 0 ? size : undefined;
       }),
-    list: async function* (path) {
-      for (const entry of await access((volume) => volume.list(pluginPath(path)))) {
-        if (!entry.is_directory && entry.name) yield entry.name;
-      }
-    },
     delete: (path) => access((volume) => volume.delete(pluginPath(path))),
   };
 }

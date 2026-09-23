@@ -6,7 +6,6 @@ import {
   APP_VIEWER_PARAM,
   UploadError,
   canAccessRun,
-  listUploads,
   readUploadBytes,
   saveUpload,
   viewerKey,
@@ -754,13 +753,9 @@ await createApp({
         next();
       });
 
-      app.all('/api/designer/uploads/:parameterName', async (req, res) => {
+      app.post('/api/designer/uploads/:parameterName', async (req, res) => {
         let admitted = false;
         try {
-          if (req.method !== 'GET' && req.method !== 'POST') {
-            res.status(405).json({ error: 'Method not allowed.' });
-            return;
-          }
           const manifest = await loadManifest(true);
           const parameter = manifest?.parameters.find(
             ({ name, type }) => name === req.params.parameterName && type === 'file',
@@ -775,10 +770,6 @@ await createApp({
             return;
           }
           const store = appKitUploadStore(manifest.uploads);
-          if (req.method === 'GET') {
-            res.json({ uploads: await listUploads(store, manifest.uploads, viewer, parameter.name) });
-            return;
-          }
           if (req.get('content-type') !== 'application/octet-stream')
             throw new UploadError(415, 'Upload the file as an octet stream.');
           if (activeUploads >= 4) throw new UploadError(429, 'Uploads are busy. Try again shortly.');

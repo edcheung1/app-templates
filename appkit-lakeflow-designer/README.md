@@ -111,13 +111,14 @@ principal read/write access; the runner job's run-as principal also needs read a
 use AppKit's Files plugin, not workspace files or app-container disk. No operator code changes are needed.
 The plugin is initialized lazily from the manifest in a backend-only AppKit instance (no server plugin).
 Its generic file-browser routes are never mounted; the Designer routes enforce viewer/parameter ownership.
-Upload, list, bounded sidecar reads, metadata, directory creation, and deletion all use the plugin API.
+Upload, bounded sidecar reads, metadata, directory creation, and deletion all use the plugin API.
 
-Viewers upload files up to 25 MiB, then click Run. Bytes are capped while reading, and the
+Viewers stage files up to 25 MiB in the browser. Clicking Run uploads the staged files before
+starting the job. Bytes are capped while reading, and the
 server limits concurrent upload requests to four. A completed upload gets an immutable generated
 directory preserving the original filename and a persisted sidecar; only completed uploads can become
-job input. The browser holds an opaque upload reference, not an arbitrary volume path. It can also select one of up to 100 saved
-uploads for that viewer/parameter. Uploads are format-agnostic: the Source operator's configured
+job input. The browser holds an opaque upload reference, not an arbitrary volume path. Uploads are
+format-agnostic: the Source operator's configured
 format, read options (including Excel sheet/range), and expected columns are unchanged. Uploading
 a file does not infer or change that format; schema/parse errors are reported by the normal job run.
 
@@ -129,8 +130,8 @@ and cancellation enforce it even if upload controls are later removed. Existing 
 direct Jobs or UC permissions, and volume owners/admins, are outside this in-app isolation boundary.
 
 Files are retained until the volume owner deletes them. There is no automatic expiration, consumer
-delete action, or deletion of storage when an App is deleted. Retained files can be selected again
-after a reload/restart. Manual cleanup must account for queued, running and retrying jobs.
+delete action, or deletion of storage when an App is deleted. The app does not expose retained files
+for selection; viewers select a local file for each browser session. Manual cleanup must account for queued, running, retrying jobs.
 Storage paths cannot be changed by republishing, so old references stay bound to the same volume.
 
 `npm test` covers storage completion/partial failures, limits, parameter resolution and ownership
