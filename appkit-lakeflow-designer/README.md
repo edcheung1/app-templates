@@ -44,8 +44,9 @@ with a **Truncated** badge when the notebook overflowed without a known total. C
 results simply show their row count. Charts warn when they use a truncated result.
 
 A complete export capped only by the app can use its original length as the exact total.
-When the notebook export itself overflowed, the total is unknown. The generated runner and its
-operator cells are unchanged; no additional counting queries or result cells are added.
+When the notebook export itself overflowed, an exact total comes from the runner's structured
+row-count result when available; otherwise it remains unknown. App runs request counts for
+published output nodes. The shared Python runtime emits those counts after the table displays.
 
 The app does not trigger a new count query or rerun the job when loading results. Full-data
 downloads are not implemented by the preview path.
@@ -98,16 +99,32 @@ updates, normalize any proxy URLs in the lockfile without changing versions or i
 hashes; changing npm's registry setting alone does not rewrite existing lockfile URLs.
 Chart rendering does not change the manifest or runner-job contracts.
 
-## File upload parameters
+## Shared App storage and file upload parameters
 
-Manifest v4 adds `uploads: { volume, path, maxFileSizeBytes }` and parameter `type: "file"`.
-The server/client still read v3 for apps without uploads; a file parameter without valid v4
-storage is rejected, never downgraded to a text field or the author's original source path.
+Manifest v5 uses one optional storage declaration for uploads and on-demand exports:
+
+```json
+{
+  "version": 5,
+  "storage": {
+    "volume": "main.apps.shared",
+    "path": "/Volumes/main/apps/shared/designer_apps/my_app",
+    "maxUploadFileSizeBytes": 5368709120
+  }
+}
+```
+
+The server/client accept v5 only. Apps without file parameters or exports may omit storage; a file
+parameter or `exports: true` without valid storage is rejected. File inputs are never downgraded
+to text or the author's original source path.
+Update the template and republish existing apps together; there is no legacy-manifest fallback.
+The app is unavailable between the template update and the v5 manifest write.
 Deploy this template before enabling Designer's `enableDesignerApps` flag; uploads share that gate.
 
-Designer provisions a per-app managed UC volume during publishing (or binds an author-selected
-existing volume). The `designer_uploads` App resource with `WRITE_VOLUME` gives the app service
-principal read/write access; the runner job's run-as principal also needs read access. Uploads
+The author selects a UC volume in Designer; publishing binds it without creating another volume.
+The existing `designer_uploads` App resource with `WRITE_VOLUME` gives the app service
+principal read/write access; the runner job's run-as principal also needs read access and, for
+exports, write access. Uploads
 use AppKit's Files plugin, not workspace files or app-container disk. No operator code changes are needed.
 The plugin is initialized lazily from the manifest in a backend-only AppKit instance (no server plugin).
 Its generic file-browser routes are never mounted; the Designer routes enforce viewer/parameter ownership.
@@ -129,18 +146,47 @@ parameter. Run submissions carry a server-owned `_lb_app_viewer` parameter; hist
 and cancellation enforce it even if upload controls are later removed. Existing users with
 direct Jobs or UC permissions, and volume owners/admins, are outside this in-app isolation boundary.
 
-Files are retained until the volume owner deletes them. There is no automatic expiration, consumer
+Uploaded files are retained until the volume owner deletes them. There is no automatic expiration, consumer
 delete action, or deletion of storage when an App is deleted. The app does not expose retained files
 for selection; viewers select a local file for each browser session. Manual cleanup must account for queued, running, retrying jobs.
-New uploads in automatically provisioned volumes use
-`/Volumes/<catalog>/<schema>/designer_<app-id>/<viewer-hash>/<parameter-hash>/<upload-id>/<filename>`.
-Shared volumes retain the `designer_uploads/<app-id>` prefix. Deploy this template's compact-path
-reader before publishing manifests with the shorter upload root. Existing files are not moved;
-viewers upload a new file after the app adopts the shorter root. The Files plugin refreshes its
-path policy when the manifest prefix changes within the same volume; no restart is needed.
+Uploads use `<storage.path>/uploads/<viewer-hash>/<parameter-hash>/<upload-id>/<filename>`.
+Exports use `<storage.path>/exports/<viewer-hash>/<request-hash>/`. Separate backend-only Files
+plugin policies restrict upload and export operations to their respective subtrees.
+Existing files are not moved or deleted; viewers upload a new file after the app adopts the new root.
+The Files plugin refreshes its path policy when the manifest root changes within the same volume; no restart is needed.
 Replacing the bound volume remains unsupported.
 
 `npm test` covers storage completion/partial failures, limits, parameter resolution and ownership
 policy with an in-memory storage boundary, plus server-route access checks and history hydration.
 Actual Apps ingress, UC provisioning/grants and Jobs
 execution still require a deployed smoke test; a local build alone does not validate those services.
+
+## On-demand CSV and Excel downloads
+
+Authors enable full-data downloads in Designer's App storage settings; the manifest then has
+`exports: true`. Viewers choose Generate CSV or Generate Excel on a successful published output.
+The App verifies run ownership, Job identity, output membership, and the current publication revision,
+then starts an idempotent export run using that source run's recorded parameters. Data is recomputed
+at export time, not retrieved from a historical snapshot. A stale publication requires a new App run.
+
+The Python helper lives in Universe alongside shared operator codegen, not in this Node.js app.
+Designer publishes a content-addressed `.py` file beside the runner notebook and pins the generated
+imports to it. The dormant hook also serves full row counts on ordinary App runs. Normal Designer
+runs do not import it. Export runs disable preview displays/counts, write just the selected output,
+then exit. The Job's run-as identity must read the helper and write to the volume; Excel generation
+additionally requires `openpyxl==3.1.5` in the Job environment.
+
+Both formats have hard limits of 1,000,000 data rows, 5,000,000 data cells, and 256 MiB, with no
+silent truncation. Excel uses a write-only workbook; unsupported Excel cell values fail with an
+actionable error. Formula-like strings are exported as literals. No Output operator is required.
+
+The browser downloads through an authenticated same-origin attachment endpoint. The App server
+streams UC bytes without buffering the full file or exposing a presigned cloud URL. A persisted
+lock prevents concurrent transfers. After a completed server transfer, it marks the artifact
+consumed and attempts to delete the result file. This is not proof that the browser saved it.
+Interrupted transfers retain the artifact for retry; a new generation is required after consumption.
+
+There is no automatic TTL, cleanup Job, or consumer DELETE endpoint. Abandoned/failed exports,
+failed deletions, request metadata, and locks left by server crashes may require manual volume
+cleanup. A stale download lock requires generating a new export. Uploads and published helper
+versions are never removed by download cleanup.

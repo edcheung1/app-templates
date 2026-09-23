@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { MAX_UPLOAD_SIZE_LABEL, UPLOAD_REFERENCE } from '../shared/uploadConfig';
-import type { AppUploads } from '../shared/uploadConfig';
+import { MAX_UPLOAD_SIZE_LABEL, UPLOAD_REFERENCE, uploadStoragePath, type AppStorage } from '../shared/storageConfig';
 
 export const APP_VIEWER_PARAM = '_lb_app_viewer';
 
@@ -49,8 +48,8 @@ export interface UploadStore {
   delete(path: string): Promise<void>;
 }
 
-function uploadFolder(config: AppUploads, viewer: string, parameterName: string): string {
-  return `${config.path}/${viewer}/${hash(parameterName)}`;
+function uploadFolder(config: AppStorage, viewer: string, parameterName: string): string {
+  return `${uploadStoragePath(config)}/${viewer}/${hash(parameterName)}`;
 }
 
 function uploadId(reference: string): string {
@@ -89,14 +88,14 @@ function parseStoredUpload(raw: unknown, reference: string, maxBytes: number): S
 
 export async function resolveUpload(
   store: UploadStore,
-  config: AppUploads,
+  config: AppStorage,
   viewer: string,
   parameterName: string,
   reference: string,
 ) {
   const id = uploadId(reference);
   const folder = uploadFolder(config, viewer, parameterName);
-  const upload = parseStoredUpload(await store.read(`${folder}/${id}.json`), reference, config.maxFileSizeBytes);
+  const upload = parseStoredUpload(await store.read(`${folder}/${id}.json`), reference, config.maxUploadFileSizeBytes);
   const path = `${folder}/${id}/${upload.filename}`;
   if ((await store.size(path)) !== upload.size)
     throw new UploadError(409, 'The uploaded file is missing or has changed. Upload it again.');
@@ -105,7 +104,7 @@ export async function resolveUpload(
 
 export async function saveUploadStream(
   store: UploadStore,
-  config: AppUploads,
+  config: AppStorage,
   viewer: string,
   parameterName: string,
   filename: string,
@@ -113,7 +112,7 @@ export async function saveUploadStream(
   declaredSize?: number,
 ): Promise<StoredUpload> {
   if (!isValidFilename(filename)) throw new UploadError(400, 'Choose a file with a valid filename.');
-  if (declaredSize !== undefined && declaredSize > config.maxFileSizeBytes)
+  if (declaredSize !== undefined && declaredSize > config.maxUploadFileSizeBytes)
     throw new UploadError(413, `Files must be at most ${MAX_UPLOAD_SIZE_LABEL}.`);
   const folder = uploadFolder(config, viewer, parameterName);
   const id = randomUUID();
@@ -126,7 +125,7 @@ export async function saveUploadStream(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
         size += chunk.byteLength;
-        if (size > config.maxFileSizeBytes) {
+        if (size > config.maxUploadFileSizeBytes) {
           validationError = new UploadError(413, `Files must be at most ${MAX_UPLOAD_SIZE_LABEL}.`);
           throw validationError;
         }
@@ -155,7 +154,7 @@ export async function saveUploadStream(
 
 export function saveUpload(
   store: UploadStore,
-  config: AppUploads,
+  config: AppStorage,
   viewer: string,
   parameterName: string,
   filename: string,

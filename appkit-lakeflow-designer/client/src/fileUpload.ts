@@ -1,4 +1,4 @@
-import { MAX_UPLOAD_BYTES, MAX_UPLOAD_SIZE_LABEL, UPLOAD_REFERENCE } from '../../shared/uploadConfig';
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_SIZE_LABEL, UPLOAD_REFERENCE } from '../../shared/storageConfig';
 import { uploadsRoute } from './routes';
 
 interface UploadChoice {

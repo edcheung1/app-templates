@@ -2,9 +2,8 @@ import { createApp, createWorkspaceClient, server } from '@databricks/appkit';
 import { exportedModelToRunPayload, findNotebookModelValue } from './exportedRunOutput';
 import type { Request } from 'express';
 import { Readable } from 'node:stream';
-import { MAX_UPLOAD_SIZE_LABEL, parseUploads, UPLOAD_REFERENCE, type AppUploads } from '../shared/uploadConfig';
+import { MAX_UPLOAD_SIZE_LABEL, parseAppStorage, UPLOAD_REFERENCE, type AppStorage } from '../shared/storageConfig';
 import {
-  APP_VIEWER_PARAM,
   UploadError,
   canAccessRun,
   saveUploadStream,
@@ -12,6 +11,9 @@ import {
 } from './fileUploads';
 import { appKitUploadStore } from './uploadStore';
 import { isReservedParameter, resolveRunParameters } from './runParameters';
+import { isExportRun, manifestRevision, registerExportRoutes } from './exports';
+import { appKitExportStore } from './exportStore';
+import { APP_REVISION_PARAM } from '../shared/exportConfig';
 
 // Each published app's manifest is written by the publish flow beside the runner notebook, in the
 // app's own publisher-owned folder (not a shared, world-writable root), and read at startup via the
@@ -20,10 +22,7 @@ import { isReservedParameter, resolveRunParameters } from './runParameters';
 // grant), then looks for the manifest file there. It lives outside the git-backed source and outside
 // client/dist, so it is never served publicly.
 const MANIFEST_FILENAME = 'designerApp.json';
-const MANIFEST_VERSION = 3;
-const TARGET_NODE_PARAM = 'target_node';
-const DISPLAY_OUTPUTS_FOR_PARAM = 'ld_display_outputs_for';
-const COLLECT_ROW_COUNTS_PARAM = '_lb_collect_row_counts';
+const MANIFEST_VERSION = 5;
 const NO_OUTPUT_REASON = 'The run finished but returned no output. The notebook did not call dbutils.notebook.exit().';
 const NO_OUTPUTS_REASON =
   'The run finished but returned a payload with no outputs. The notebook was published with nothing to return.';
@@ -61,7 +60,8 @@ type AppBlock =
       chartSpec?: Record<string, unknown>;
     };
 type AppManifest = {
-  uploads?: AppUploads;
+  exports?: boolean;
+  storage?: AppStorage;
   version: number;
   appName: string;
   subtitle?: string;
@@ -227,7 +227,7 @@ function parseManifest(raw: unknown): AppManifest | undefined {
   } catch {
     return undefined;
   }
-  if (!isRecord(parsed) || (parsed.version !== MANIFEST_VERSION && parsed.version !== 4)) {
+  if (!isRecord(parsed) || parsed.version !== MANIFEST_VERSION) {
     return undefined;
   }
   if (typeof parsed.appName !== 'string' || parsed.appName === '') {
@@ -245,11 +245,12 @@ function parseManifest(raw: unknown): AppManifest | undefined {
   if (!Array.isArray(parsed.parameters)) {
     return undefined;
   }
-  const uploads = parseUploads(parsed.uploads);
+  const storage = parseAppStorage(parsed.storage);
   if (
-    (parsed.version === 4 && !uploads) ||
-    (parsed.version === 3 && parsed.uploads !== undefined) ||
-    (parsed.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !uploads)
+    (parsed.exports !== undefined && typeof parsed.exports !== 'boolean') ||
+    (parsed.exports === true && !storage) ||
+    (parsed.storage !== undefined && !storage) ||
+    (parsed.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !storage)
   )
     return undefined;
   const parameters: AppParameter[] = parsed.parameters.filter(isRecord).flatMap((entry): AppParameter[] => {
@@ -287,7 +288,8 @@ function parseManifest(raw: unknown): AppManifest | undefined {
   });
   return {
     version: parsed.version,
-    ...(uploads === undefined ? {} : { uploads }),
+    ...(parsed.exports === true ? { exports: true } : {}),
+    ...(storage === undefined ? {} : { storage }),
     appName: parsed.appName,
     ...(typeof parsed.subtitle === 'string' && parsed.subtitle !== '' ? { subtitle: parsed.subtitle } : {}),
     // Carry provenance as one opaque object across the server projection.
@@ -358,8 +360,9 @@ async function accessibleRun(
     detail = await wsClient().jobs.getRun({ run_id: Number(id) });
   }
   return isRecord(detail) &&
+    !isExportRun(detail) &&
     runBelongsToJob(detail, JOB_ID) &&
-    canAccessRun(detail, requestViewer(req), manifest.uploads !== undefined)
+    canAccessRun(detail, requestViewer(req), manifest.storage !== undefined)
     ? detail
     : undefined;
 }
@@ -662,10 +665,7 @@ function runParameterData(
   const displayValues: Record<string, string> = {};
   for (const [name, value] of Object.entries(overriding.notebook_params)) {
     if (
-      name === TARGET_NODE_PARAM ||
-      name === DISPLAY_OUTPUTS_FOR_PARAM ||
-      name === COLLECT_ROW_COUNTS_PARAM ||
-      name === APP_VIEWER_PARAM ||
+      isReservedParameter(name) ||
       typeof value !== 'string'
     ) {
       continue;
@@ -767,6 +767,26 @@ await createApp({
         next();
       });
 
+      registerExportRoutes(app, {
+        jobId: JOB_ID,
+        manifest: () => loadManifest(true),
+        viewer: requestViewer,
+        notebookPath: async () => {
+          const job = await wsClient().jobs.get({ job_id: Number(JOB_ID) });
+          const tasks = job.settings?.tasks;
+          return tasks?.length === 1 ? tasks[0].notebook_task?.notebook_path : undefined;
+        },
+        getRun: (run_id) => wsClient().jobs.getRun({ run_id }),
+        start: async (notebook_params, idempotency_token) => {
+          const run = await wsClient().jobs.runNow({ job_id: Number(JOB_ID), notebook_params, idempotency_token });
+          if (!run.run_id) throw new Error('The export job returned no run id.');
+          return run.run_id;
+        },
+        cancel: async (run_id) => { await wsClient().jobs.cancelRun({ run_id }); },
+        store: appKitExportStore,
+        report: (error) => console.error('Export request failed', error),
+      });
+
       app.post('/api/designer/uploads/:parameterName', async (req, res) => {
         let admitted = false;
         try {
@@ -774,7 +794,7 @@ await createApp({
           const parameter = manifest?.parameters.find(
             ({ name, type }) => name === req.params.parameterName && type === 'file',
           );
-          if (!parameter || !manifest?.uploads) {
+          if (!parameter || !manifest?.storage) {
             res.status(404).json({ error: 'This app has no such file parameter.' });
             return;
           }
@@ -783,7 +803,7 @@ await createApp({
             res.status(401).json({ error: 'Sign in through Databricks Apps to upload files.' });
             return;
           }
-          const store = appKitUploadStore(manifest.uploads);
+          const store = appKitUploadStore(manifest.storage);
           if (req.get('content-type') !== 'application/octet-stream')
             throw new UploadError(415, 'Upload the file as an octet stream.');
           if (activeUploads >= 4) throw new UploadError(429, 'Uploads are busy. Try again shortly.');
@@ -791,7 +811,7 @@ await createApp({
           if (contentLength !== undefined && !/^\d+$/.test(contentLength))
             throw new UploadError(400, 'The Content-Length header is invalid.');
           const declaredSize = contentLength === undefined ? undefined : Number(contentLength);
-          if (declaredSize !== undefined && declaredSize > manifest.uploads.maxFileSizeBytes)
+          if (declaredSize !== undefined && declaredSize > manifest.storage.maxUploadFileSizeBytes)
             throw new UploadError(413, `The file exceeds the ${MAX_UPLOAD_SIZE_LABEL} upload limit.`);
           let filename: string;
           try {
@@ -806,7 +826,7 @@ await createApp({
             .json({
               upload: await saveUploadStream(
                 store,
-                manifest.uploads,
+                manifest.storage,
                 viewer,
                 parameter.name,
                 filename,
@@ -972,7 +992,7 @@ await createApp({
             manifest,
             submitted,
             requestViewer(req),
-            appKitUploadStore(manifest.uploads),
+            appKitUploadStore(manifest.storage),
           );
           if (!resolved.ok) {
             res.status(400).json({ error: resolved.error });
@@ -980,6 +1000,7 @@ await createApp({
           }
 
           // Writes MUST NEVER BE retried; replaying runNow can start duplicate compute.
+          resolved.params[APP_REVISION_PARAM] = manifestRevision(manifest);
           const run = await wsClient().jobs.runNow({ job_id: Number(JOB_ID), notebook_params: resolved.params });
           const jobRunId = idFrom(run?.run_id);
           if (jobRunId === undefined) {

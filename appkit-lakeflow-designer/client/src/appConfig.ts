@@ -1,7 +1,7 @@
 import { CONFIG_ROUTE } from './routes';
-import { parseUploads, type AppUploads } from '../../shared/uploadConfig';
+import { parseAppStorage, type AppStorage } from '../../shared/storageConfig';
 
-export const APP_MANIFEST_VERSION = 3;
+export const APP_MANIFEST_VERSION = 5;
 
 export const TARGET_NODE_PARAM = 'target_node';
 
@@ -53,7 +53,8 @@ export type AppMarkdownBlock = {
 export type AppManifestBlock = AppMarkdownBlock | AppOutputBlock;
 
 export type AppManifest = {
-  uploads?: AppUploads;
+  exports?: boolean;
+  storage?: AppStorage;
   version: number;
   appName: string;
   subtitle?: string;
@@ -93,7 +94,7 @@ export function parseAppManifest(raw: unknown): AppManifest | undefined {
   if (!isRecord(raw)) {
     return undefined;
   }
-  if (raw.version !== APP_MANIFEST_VERSION && raw.version !== 4) {
+  if (raw.version !== APP_MANIFEST_VERSION) {
     return undefined;
   }
   if (typeof raw.appName !== 'string' || raw.appName === '') {
@@ -108,15 +109,17 @@ export function parseAppManifest(raw: unknown): AppManifest | undefined {
   if (!Array.isArray(raw.parameters)) {
     return undefined;
   }
-  const uploads = parseUploads(raw.uploads);
+  const storage = parseAppStorage(raw.storage);
   if (
-    (raw.version === 4 && !uploads) ||
-    (raw.version === 3 && raw.uploads !== undefined) ||
-    (raw.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !uploads)
+    (raw.exports !== undefined && typeof raw.exports !== 'boolean') ||
+    (raw.exports === true && !storage) ||
+    (raw.storage !== undefined && !storage) ||
+    (raw.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !storage)
   )
     return undefined;
   return {
-    ...(uploads === undefined ? {} : { uploads }),
+    ...(raw.exports === true ? { exports: true } : {}),
+    ...(storage === undefined ? {} : { storage }),
     version: raw.version,
     appName: raw.appName,
     ...(typeof raw.subtitle === 'string' && raw.subtitle !== '' ? { subtitle: raw.subtitle } : {}),
@@ -181,7 +184,7 @@ function parseParameter(entry: Record<string, unknown>): AppParameter[] {
   if (typeof entry.name !== 'string' || entry.name === '' || typeof entry.label !== 'string') {
     return [];
   }
-  if (entry.name === TARGET_NODE_PARAM || entry.name === 'ld_display_outputs_for' || entry.name.startsWith('_lb_')) {
+  if (entry.name === TARGET_NODE_PARAM || entry.name === 'ld_display_outputs' || entry.name === 'ld_display_outputs_for' || entry.name.startsWith('_lb_')) {
     return [];
   }
   const declared = isParameterType(entry.type) ? entry.type : 'text';

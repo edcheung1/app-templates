@@ -1,12 +1,12 @@
-import type { AppUploads } from '../shared/uploadConfig';
+import type { AppStorage } from '../shared/storageConfig';
 import { APP_VIEWER_PARAM, UploadError, resolveUpload, type UploadStore } from './fileUploads';
 
 export function isReservedParameter(name: string): boolean {
-  return name === 'target_node' || name === 'ld_display_outputs_for' || name.startsWith('_lb_');
+  return name === 'target_node' || name === 'ld_display_outputs' || name === 'ld_display_outputs_for' || name.startsWith('_lb_');
 }
 
 interface ParameterManifest {
-  uploads?: AppUploads;
+  storage?: AppStorage;
   blocks?: { type: string; nodeId?: string }[];
   parameters: { name: string; label: string; type: string; defaultValue: string; choices?: string[] }[];
 }
@@ -31,7 +31,7 @@ export async function resolveRunParameters(
   store: UploadStore,
 ): Promise<{ ok: true; params: Record<string, string> } | { ok: false; error: string }> {
   const params: Record<string, string> = {};
-  if (manifest.uploads && !viewer)
+  if (manifest.storage && !viewer)
     return { ok: false, error: 'Sign in through Databricks Apps to run an app with uploads.' };
   for (const parameter of manifest.parameters) {
     if (isReservedParameter(parameter.name)) continue;
@@ -39,9 +39,9 @@ export async function resolveRunParameters(
     const value = raw === undefined || raw === null ? '' : String(raw);
     const resolved = value.trim() === '' ? parameter.defaultValue : value;
     if (parameter.type === 'file') {
-      if (!manifest.uploads || !viewer) return { ok: false, error: 'File uploads are not configured.' };
+      if (!manifest.storage || !viewer) return { ok: false, error: 'File uploads are not configured.' };
       try {
-        params[parameter.name] = (await resolveUpload(store, manifest.uploads, viewer, parameter.name, resolved)).path;
+        params[parameter.name] = (await resolveUpload(store, manifest.storage, viewer, parameter.name, resolved)).path;
       } catch (error) {
         return {
           ok: false,
@@ -66,6 +66,6 @@ export async function resolveRunParameters(
     params[DISPLAY_OUTPUTS_FOR_PARAM] = displayedNodes;
     params[COLLECT_ROW_COUNTS_PARAM] = 'true';
   }
-  if (manifest.uploads && viewer) params[APP_VIEWER_PARAM] = viewer;
+  if (manifest.storage && viewer) params[APP_VIEWER_PARAM] = viewer;
   return { ok: true, params };
 }

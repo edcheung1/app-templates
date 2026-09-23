@@ -8,6 +8,7 @@ import remarkGfm from 'remark-gfm';
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Card } from '@databricks/appkit-ui/react';
 
 import { ActiveRunBanner } from './ActiveRunBanner';
+import { ExportDownload } from './ExportDownload';
 import type {
   AppChartSpec,
   AppConfigState,
@@ -601,6 +602,7 @@ export function App() {
         <Card className="overflow-hidden p-0 [&>*:first-child]:border-t-0">
           <PublishedBlocks
             blocks={manifest.blocks}
+            exportRunId={manifest.exports && displayedRun?.resultState === 'SUCCESS' ? displayedRun.jobRunId : undefined}
             outputs={displayedOutputs}
             unmatchedState={unmatchedOutputState}
             onRetry={run}
@@ -847,11 +849,13 @@ function RunResult({
 
 function PublishedBlocks({
   blocks,
+  exportRunId,
   outputs,
   unmatchedState,
   onRetry,
 }: {
   blocks: AppManifestBlock[];
+  exportRunId?: string;
   outputs: MatchedOutput[];
   unmatchedState: UnmatchedOutputState;
   onRetry: () => void;
@@ -867,6 +871,7 @@ function PublishedBlocks({
           <PublishedOutputBlock
             key={match.key}
             block={match.block}
+            exportRunId={exportRunId}
             output={match.output}
             unmatchedState={unmatchedState}
             onRetry={onRetry}
@@ -897,11 +902,13 @@ function MarkdownBlock({ block }: { block: AppMarkdownBlock }) {
 
 function PublishedOutputBlock({
   block,
+  exportRunId,
   output,
   unmatchedState,
   onRetry,
 }: {
   block: AppOutputBlock;
+  exportRunId?: string;
   output?: MatchedOutput;
   unmatchedState: UnmatchedOutputState;
   onRetry: () => void;
@@ -916,6 +923,7 @@ function PublishedOutputBlock({
   }
   return (
     <OutputSection
+      exportRequest={exportRunId ? { sourceRunId: exportRunId, outputId: block.id } : undefined}
       output={{
         ...output,
         title: outputTitle(block),
@@ -965,7 +973,7 @@ function OutputHeading({
   );
 }
 
-function OutputSection({ output, onRetry }: { output: MatchedOutput; onRetry: () => void }) {
+function OutputSection({ output, onRetry, exportRequest }: { output: MatchedOutput; onRetry: () => void; exportRequest?: { sourceRunId: string; outputId: string } }) {
   const { outcome } = output;
   return (
     <section className="border-border border-t [&>*]:border-t-0">
@@ -973,6 +981,7 @@ function OutputSection({ output, onRetry }: { output: MatchedOutput; onRetry: ()
       {outcome.outcome === 'result' ? (
         <ResultSection payload={outcome.payload} chartSpec={output.chartSpec} />
       ) : null}
+      {outcome.outcome === 'result' && exportRequest && <ExportDownload key={`${exportRequest.sourceRunId}:${exportRequest.outputId}`} {...exportRequest} />}
       {outcome.outcome === 'computeError' ? <ComputeError payload={outcome.payload} onRetry={onRetry} /> : null}
       {outcome.outcome === 'malformed' ? <MalformedOutput reason={outcome.reason} /> : null}
       {outcome.outcome === 'missing' ? <MissingOutput reason={outcome.reason} /> : null}

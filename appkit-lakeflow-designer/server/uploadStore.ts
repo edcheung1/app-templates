@@ -1,12 +1,12 @@
 import { ApiError, createApp, files } from '@databricks/appkit';
-import type { AppUploads } from '../shared/uploadConfig';
+import { uploadStoragePath, type AppStorage } from '../shared/storageConfig';
 import { UploadError, type UploadStore } from './fileUploads';
 
 const VOLUME_KEY = 'files';
 let storageVolume: string | undefined;
 let cachedVolume: { path: string; promise: ReturnType<typeof createUploadVolume> } | undefined;
 
-async function createUploadVolume(config: AppUploads) {
+async function createUploadVolume(config: AppStorage) {
   // The trusted manifest supplies the optional volume resource. Do not require it in app.yaml:
   // ordinary apps have no volume, and an existing app can enable uploads on republish.
   process.env.DATABRICKS_VOLUME_FILES = `/Volumes/${config.volume.replaceAll('.', '/')}`;
@@ -19,7 +19,7 @@ async function createUploadVolume(config: AppUploads) {
           [VOLUME_KEY]: {
             auth: 'service-principal',
             policy: (_action, resource, user) =>
-              user.isServicePrincipal === true && resource.path.startsWith(`${config.path}/`),
+              user.isServicePrincipal === true && resource.path.startsWith(`${uploadStoragePath(config)}/`),
           },
         },
       }),
@@ -28,7 +28,7 @@ async function createUploadVolume(config: AppUploads) {
   return appkit.files(VOLUME_KEY);
 }
 
-async function uploadVolume(config: AppUploads | undefined) {
+async function uploadVolume(config: AppStorage | undefined) {
   if (!config) throw new UploadError(409, 'File uploads are not configured.');
   if (storageVolume !== undefined && storageVolume !== config.volume)
     throw new UploadError(409, 'Published upload storage cannot be changed.');
@@ -47,7 +47,7 @@ async function uploadVolume(config: AppUploads | undefined) {
 // AppKit 0.70 embeds paths directly in upload URLs; encode segments so filenames stay literal.
 const pluginPath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
 
-export function appKitUploadStore(config: AppUploads | undefined): UploadStore {
+export function appKitUploadStore(config: AppStorage | undefined): UploadStore {
   const access = async <T>(operation: (volume: Awaited<ReturnType<typeof uploadVolume>>) => Promise<T>): Promise<T> => {
     try {
       return await operation(await uploadVolume(config));

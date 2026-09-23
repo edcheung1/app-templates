@@ -11,7 +11,7 @@ before(async () => {
   await build({
     entry: {
       fileUploads: 'server/fileUploads.ts',
-      uploadConfig: 'shared/uploadConfig.ts',
+      storageConfig: 'shared/storageConfig.ts',
       runParameters: 'server/runParameters.ts',
       appConfig: 'client/src/appConfig.ts',
     },
@@ -22,7 +22,7 @@ before(async () => {
     logLevel: 'silent',
   });
   uploads = await import(pathToFileURL(join(outputDirectory, 'fileUploads.mjs')).href);
-  config = await import(pathToFileURL(join(outputDirectory, 'uploadConfig.mjs')).href);
+  config = await import(pathToFileURL(join(outputDirectory, 'storageConfig.mjs')).href);
   parameters = await import(pathToFileURL(join(outputDirectory, 'runParameters.mjs')).href);
   appConfig = await import(pathToFileURL(join(outputDirectory, 'appConfig.mjs')).href);
 });
@@ -32,14 +32,14 @@ after(async () => {
 
 const storage = {
   volume: 'main.default.designer_app1',
-  path: '/Volumes/main/default/designer_app1',
-  maxFileSizeBytes: 5 * 1024 * 1024 * 1024,
+  path: '/Volumes/main/default/designer_app1/designer_apps/app1',
+  maxUploadFileSizeBytes: 5 * 1024 * 1024 * 1024,
 };
 const fileParameter = { name: 'path', type: 'file', label: 'Data', defaultValue: '/Volumes/private/author.csv' };
 const manifest = {
-  version: 4,
+  version: 5,
   appName: 'Uploads',
-  uploads: storage,
+  storage,
   parameters: [fileParameter],
   blocks: [{ type: 'output', id: 'data', nodeId: 'source', port: 'data', label: 'Data' }],
 };
@@ -74,7 +74,8 @@ test('saves immutable bytes, resolves an upload after service restart, and isola
   const alice = uploads.viewerKey('alice', '100');
   const saved = await uploads.saveUpload(store, storage, alice, 'path', 'sales.csv', Buffer.from('a,b\n1,2\n'));
   const resolved = await uploads.resolveUpload({ ...store }, storage, alice, 'path', saved.reference);
-  assert.equal(resolved.path.slice(storage.path.length + 1).split('/').length, 4);
+  assert.ok(resolved.path.startsWith(`${storage.path}/uploads/${alice}/`));
+  assert.equal(resolved.path.slice(storage.path.length + 1).split('/').length, 5);
   assert.equal(store.files.get(resolved.path).toString(), 'a,b\n1,2\n');
   for (const [owner, name, root] of [
     [uploads.viewerKey('bob', '100'), 'path', storage],
@@ -125,7 +126,7 @@ test('substitutes only completed owned uploads and stamps ownership for run para
   assert.equal(
     (
       await parameters.resolveRunParameters(
-        { ...manifest, uploads: undefined },
+        { ...manifest, storage: undefined },
         { path: saved.reference },
         owner,
         store,
@@ -167,19 +168,19 @@ test('streams uploads while enforcing actual byte limits, empty files and interr
     });
   const saved = await uploads.saveUploadStream(
     store,
-    { ...storage, maxFileSizeBytes: 4 },
+    { ...storage, maxUploadFileSizeBytes: 4 },
     'viewer',
     'path',
     'data.csv',
     stream('ab', 'cd'),
     4,
   );
-  assert.equal((await uploads.resolveUpload(store, { ...storage, maxFileSizeBytes: 4 }, 'viewer', 'path', saved.reference)).upload.size, 4);
+  assert.equal((await uploads.resolveUpload(store, { ...storage, maxUploadFileSizeBytes: 4 }, 'viewer', 'path', saved.reference)).upload.size, 4);
 
   await assert.rejects(
     uploads.saveUploadStream(
       store,
-      { ...storage, maxFileSizeBytes: 4 },
+      { ...storage, maxUploadFileSizeBytes: 4 },
       'viewer',
       'path',
       'large.csv',
@@ -216,7 +217,7 @@ test('rejects unsafe filenames and declared sizes', async () => {
     await assert.rejects(uploads.saveUpload(store, storage, 'viewer', 'path', filename, Buffer.from('a')), /valid filename/);
   }
   await assert.rejects(
-    uploads.saveUpload(store, { ...storage, maxFileSizeBytes: 1 }, 'viewer', 'path', 'data.csv', Buffer.from('aa')),
+    uploads.saveUpload(store, { ...storage, maxUploadFileSizeBytes: 1 }, 'viewer', 'path', 'data.csv', Buffer.from('aa')),
     /at most/,
   );
   assert.equal(store.files.size, 0);
@@ -270,37 +271,44 @@ test('run ownership protects history, results and cancellation even after upload
 });
 
 test('validates versioned storage and never initializes a file input with the author path', () => {
-  assert.deepEqual(config.parseUploads(storage), storage);
-  const shared = { ...storage, volume: 'main.default.shared', path: '/Volumes/main/default/shared/designer_uploads/app1' };
-  assert.deepEqual(config.parseUploads(shared), shared);
+  assert.deepEqual(config.parseAppStorage(storage), storage);
+  const shared = { ...storage, volume: 'main.default.shared', path: '/Volumes/main/default/shared/designer_apps/app1' };
+  assert.deepEqual(config.parseAppStorage(shared), shared);
   for (const invalid of [
     undefined,
     { ...storage, volume: 'a.b' },
-    { ...storage, path: '/Volumes/other/default/uploads/designer_uploads/app1' },
+    { ...storage, path: '/Volumes/other/default/uploads/designer_apps/app1' },
     { ...storage, path: storage.path + '/../escape' },
     { ...storage, path: storage.path + '/' },
     { ...shared, path: '/Volumes/main/default/shared' },
-    { ...storage, maxFileSizeBytes: 5 * 1024 * 1024 * 1024 + 1 },
+    { ...storage, maxUploadFileSizeBytes: 5 * 1024 * 1024 * 1024 + 1 },
   ]) {
-    assert.equal(config.parseUploads(invalid), undefined);
+    assert.equal(config.parseAppStorage(invalid), undefined);
   }
   const parsed = appConfig.parseAppManifest(manifest);
-  assert.equal(parsed.version, 4);
+  assert.equal(parsed.version, 5);
+  assert.deepEqual(parsed.storage, storage);
   assert.equal(parsed.parameters[0].defaultValue, '');
   assert.deepEqual(appConfig.initialValuesFor(parsed, { path: '/Volumes/private/file.csv' }), { path: '' });
   assert.deepEqual(appConfig.initialValuesFor(parsed, { path: 'upload:829dcaa7-e505-49c1-b6d0-73d1841e990a' }), {
     path: '',
   });
-  assert.equal(appConfig.parseAppManifest({ ...manifest, version: 3 }), undefined);
-  assert.equal(appConfig.parseAppManifest({ ...manifest, uploads: undefined }), undefined);
-  assert.equal(appConfig.parseAppManifest({ ...manifest, version: 3, uploads: undefined }), undefined);
+  for (const version of [3, 4, 6]) {
+    assert.equal(appConfig.parseAppManifest({ ...manifest, version }), undefined);
+  }
+  assert.equal(appConfig.parseAppManifest({ ...manifest, storage: undefined }), undefined);
   const regular = appConfig.parseAppManifest({
     ...manifest,
-    version: 3,
-    uploads: undefined,
+    version: 5,
+    storage: undefined,
     parameters: [{ ...fileParameter, type: 'text' }],
   });
   assert.equal(regular.parameters[0].defaultValue, fileParameter.defaultValue);
+  assert.equal(regular.storage, undefined);
+  assert.deepEqual(appConfig.parseAppManifest({ ...manifest, parameters: [] }).storage, storage);
+  for (const invalid of [null, {}, { ...storage, maxUploadFileSizeBytes: 0 }]) {
+    assert.equal(appConfig.parseAppManifest({ ...manifest, storage: invalid, parameters: [] }), undefined);
+  }
 });
 
 test('ordinary parameters retain defaults and dropdown validation without ownership metadata', async () => {
