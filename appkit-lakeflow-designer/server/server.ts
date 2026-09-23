@@ -1,5 +1,18 @@
 import { createApp, createWorkspaceClient, server } from '@databricks/appkit';
 import { exportedModelToRunPayload, findNotebookModelValue } from './exportedRunOutput';
+import type { Request } from 'express';
+import { parseUploads, UPLOAD_REFERENCE, type AppUploads } from '../shared/uploadConfig';
+import {
+  APP_VIEWER_PARAM,
+  UploadError,
+  canAccessRun,
+  listUploads,
+  readUploadBytes,
+  saveUpload,
+  viewerKey,
+} from './fileUploads';
+import { appKitUploadStore } from './uploadStore';
+import { isReservedParameter, resolveRunParameters } from './runParameters';
 
 // Each published app's manifest is written by the publish flow beside the runner notebook, in the
 // app's own publisher-owned folder (not a shared, world-writable root), and read at startup via the
@@ -10,9 +23,13 @@ import { exportedModelToRunPayload, findNotebookModelValue } from './exportedRun
 const MANIFEST_FILENAME = 'designerApp.json';
 const MANIFEST_VERSION = 3;
 const TARGET_NODE_PARAM = 'target_node';
-const NO_OUTPUT_REASON = "The run finished but returned no output. The notebook did not call dbutils.notebook.exit().";
-const NO_OUTPUTS_REASON = "The run finished but returned a payload with no outputs. The notebook was published with nothing to return.";
-const MISSING_OUTPUT_REASON = "This output is published with the app, but the run did not return it. That happens when the run predates the output being added, or when the app and its runner have drifted apart.";
+const DISPLAY_OUTPUTS_FOR_PARAM = 'ld_display_outputs_for';
+const COLLECT_ROW_COUNTS_PARAM = '_lb_collect_row_counts';
+const NO_OUTPUT_REASON = 'The run finished but returned no output. The notebook did not call dbutils.notebook.exit().';
+const NO_OUTPUTS_REASON =
+  'The run finished but returned a payload with no outputs. The notebook was published with nothing to return.';
+const MISSING_OUTPUT_REASON =
+  'This output is published with the app, but the run did not return it. That happens when the run predates the output being added, or when the app and its runner have drifted apart.';
 
 // SKIPPED and INTERNAL_ERROR are terminal even when no task ran.
 const TERMINAL_LIFE_CYCLE_STATES = new Set(['TERMINATED', 'SKIPPED', 'INTERNAL_ERROR']);
@@ -29,15 +46,23 @@ const errText = (err: unknown): string => (err instanceof Error ? err.message : 
 type AppParameter = {
   name: string;
   label: string;
-  type: 'text' | 'number' | 'dropdown';
+  type: 'text' | 'number' | 'dropdown' | 'file';
   defaultValue: string;
   choices?: string[];
   help?: string;
 };
 type AppBlock =
   | { type: 'markdown'; id?: string; text: string }
-  | { type: 'output'; id: string; label: string; nodeId: string; port: string; chartSpec?: Record<string, unknown> };
+  | {
+      type: 'output';
+      id: string;
+      label: string;
+      nodeId: string;
+      port: string;
+      chartSpec?: Record<string, unknown>;
+    };
 type AppManifest = {
+  uploads?: AppUploads;
   version: number;
   appName: string;
   subtitle?: string;
@@ -114,9 +139,12 @@ const loadManifest = async (forceFresh = false): Promise<AppManifest | undefined
     cachedManifest = manifest;
     hasCachedManifest = true;
   }
-  // A fresh read that failed falls back to the last good manifest, so a transient export blip does
-  // not flip a configured app to "unconfigured".
-  return manifest ?? (hasCachedManifest ? cachedManifest : undefined);
+  // A stale pre-upload manifest must not re-enable public execution after a private republish.
+  if (forceFresh && manifest === undefined) {
+    cachedManifest = undefined;
+    hasCachedManifest = false;
+  }
+  return manifest;
 };
 
 function manifestFolderFromNotebookPath(notebookPath: string): string {
@@ -164,7 +192,9 @@ async function readManifest() {
   try {
     // The AppKit facade exposes no workspace service, so reach it through the legacy client; export
     // returns base64 content.
-    const exported = await wsClient().toLegacyWorkspaceClient().workspace.export({ path: manifestPath, format: 'SOURCE' });
+    const exported = await wsClient()
+      .toLegacyWorkspaceClient()
+      .workspace.export({ path: manifestPath, format: 'SOURCE' });
     if (typeof exported.content !== 'string') {
       return undefined;
     }
@@ -176,7 +206,12 @@ async function readManifest() {
 }
 
 function toProvenance(raw: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(raw) || typeof raw.publishedAt !== 'number' || !Number.isFinite(raw.publishedAt) || raw.publishedAt <= 0) {
+  if (
+    !isRecord(raw) ||
+    typeof raw.publishedAt !== 'number' ||
+    !Number.isFinite(raw.publishedAt) ||
+    raw.publishedAt <= 0
+  ) {
     return undefined;
   }
   return { ...raw, publishedAt: raw.publishedAt };
@@ -192,7 +227,7 @@ function parseManifest(raw: unknown): AppManifest | undefined {
   } catch {
     return undefined;
   }
-  if (!isRecord(parsed) || parsed.version !== MANIFEST_VERSION) {
+  if (!isRecord(parsed) || (parsed.version !== MANIFEST_VERSION && parsed.version !== 4)) {
     return undefined;
   }
   if (typeof parsed.appName !== 'string' || parsed.appName === '') {
@@ -210,17 +245,32 @@ function parseManifest(raw: unknown): AppManifest | undefined {
   if (!Array.isArray(parsed.parameters)) {
     return undefined;
   }
+  const uploads = parseUploads(parsed.uploads);
+  if (
+    (parsed.version === 4 && !uploads) ||
+    (parsed.version === 3 && parsed.uploads !== undefined) ||
+    (parsed.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !uploads)
+  )
+    return undefined;
   const parameters: AppParameter[] = parsed.parameters.filter(isRecord).flatMap((entry): AppParameter[] => {
-    if (typeof entry.name !== 'string' || entry.name === '' || entry.name === TARGET_NODE_PARAM) {
+    if (typeof entry.name !== 'string' || entry.name === '' || isReservedParameter(entry.name)) {
       return [];
     }
     if (typeof entry.label !== 'string') {
       return [];
     }
     const declared: AppParameter['type'] =
-      entry.type === 'number' ? 'number' : entry.type === 'dropdown' ? 'dropdown' : 'text';
+      entry.type === 'file'
+        ? 'file'
+        : entry.type === 'number'
+          ? 'number'
+          : entry.type === 'dropdown'
+            ? 'dropdown'
+            : 'text';
     const choices =
-      Array.isArray(entry.choices) && entry.choices.length > 0 && entry.choices.every((choice) => typeof choice === 'string')
+      Array.isArray(entry.choices) &&
+      entry.choices.length > 0 &&
+      entry.choices.every((choice) => typeof choice === 'string')
         ? (entry.choices as string[])
         : undefined;
     const type: AppParameter['type'] = declared === 'dropdown' && choices === undefined ? 'text' : declared;
@@ -229,14 +279,15 @@ function parseManifest(raw: unknown): AppManifest | undefined {
         name: entry.name,
         label: entry.label,
         type,
-        defaultValue: typeof entry.defaultValue === 'string' ? entry.defaultValue : '',
+        defaultValue: type === 'file' ? '' : typeof entry.defaultValue === 'string' ? entry.defaultValue : '',
         ...(type === 'dropdown' && choices !== undefined ? { choices } : {}),
         ...(typeof entry.help === 'string' && entry.help !== '' ? { help: entry.help } : {}),
       },
     ];
   });
   return {
-    version: MANIFEST_VERSION,
+    version: parsed.version,
+    ...(uploads === undefined ? {} : { uploads }),
     appName: parsed.appName,
     ...(typeof parsed.subtitle === 'string' && parsed.subtitle !== '' ? { subtitle: parsed.subtitle } : {}),
     // Carry provenance as one opaque object across the server projection.
@@ -286,24 +337,31 @@ function parseBlocks(raw: unknown): AppBlock[] {
   return blocks;
 }
 
-function resolveRunParameters(
-  manifest: AppManifest,
-  submitted: Record<string, unknown>,
-): { ok: true; params: Record<string, string> } | { ok: false; error: string } {
-  const params: Record<string, string> = {};
-  for (const parameter of manifest.parameters) {
-    if (parameter.name === TARGET_NODE_PARAM) {
-      continue;
-    }
-    const raw = submitted[parameter.name];
-    const value = raw === undefined || raw === null ? '' : String(raw);
-    const resolved = value.trim() === '' ? parameter.defaultValue : value;
-    if (parameter.type === 'dropdown' && Array.isArray(parameter.choices) && !parameter.choices.includes(resolved)) {
-      return { ok: false, error: `"${parameter.label}" must be one of the offered choices.` };
-    }
-    params[parameter.name] = resolved;
+const requestViewer = (req: Request) => viewerKey(req.get('x-forwarded-user'), JOB_ID);
+
+async function accessibleRun(
+  run: unknown,
+  req: Request,
+  hydrate = false,
+): Promise<Record<string, unknown> | undefined> {
+  if (!runBelongsToJob(run, JOB_ID)) return undefined;
+  const manifest = await loadManifest();
+  if (!manifest) return undefined;
+  let detail = run;
+  if (
+    hydrate &&
+    isRecord(run) &&
+    (!isRecord(run.overriding_parameters) || !isRecord(run.overriding_parameters.notebook_params))
+  ) {
+    const id = idFrom(run.run_id);
+    if (!id) return undefined;
+    detail = await wsClient().jobs.getRun({ run_id: Number(id) });
   }
-  return { ok: true, params };
+  return isRecord(detail) &&
+    runBelongsToJob(detail, JOB_ID) &&
+    canAccessRun(detail, requestViewer(req), manifest.uploads !== undefined)
+    ? detail
+    : undefined;
 }
 
 function classifyOutputEntry(entry: unknown, index: number): ClassifiedEntry {
@@ -313,7 +371,12 @@ function classifyOutputEntry(entry: unknown, index: number): ClassifiedEntry {
   const id = typeof entry.id === 'string' && entry.id !== '' ? entry.id : undefined;
   if (entry.status === 'error') {
     if (!isReadableError(entry.error)) {
-      return { outcome: 'malformed', index, id, reason: 'This output reported an error, but the error was not readable.' };
+      return {
+        outcome: 'malformed',
+        index,
+        id,
+        reason: 'This output reported an error, but the error was not readable.',
+      };
     }
     return { outcome: 'computeError', index, id, payload: entry };
   }
@@ -326,16 +389,31 @@ function classifyOutputEntry(entry: unknown, index: number): ClassifiedEntry {
     };
   }
   if (!Array.isArray(entry.schema) || !Array.isArray(entry.rows)) {
-    return { outcome: 'malformed', index, id, reason: 'This output reported success but is missing the schema or rows.' };
+    return {
+      outcome: 'malformed',
+      index,
+      id,
+      reason: 'This output reported success but is missing the schema or rows.',
+    };
   }
   if (!entry.schema.every(isSchemaField) || !entry.rows.every(isRecord)) {
-    return { outcome: 'malformed', index, id, reason: 'This output reported success but its schema or rows are malformed.' };
+    return {
+      outcome: 'malformed',
+      index,
+      id,
+      reason: 'This output reported success but its schema or rows are malformed.',
+    };
   }
   const fieldNames = entry.schema.map((field) => field.name);
   // Rows are keyed by column name downstream, so blank or duplicate names silently collapse
   // columns; reject the output rather than render data that has lost or merged a column.
   if (fieldNames.some((name) => name === '') || new Set(fieldNames).size !== fieldNames.length) {
-    return { outcome: 'malformed', index, id, reason: 'This output reported success but its columns have blank or duplicate names.' };
+    return {
+      outcome: 'malformed',
+      index,
+      id,
+      reason: 'This output reported success but its columns have blank or duplicate names.',
+    };
   }
   return { outcome: 'result', index, id, payload: entry };
 }
@@ -488,7 +566,9 @@ async function readRunOutputPayload(taskRunId: string): Promise<string | undefin
   // Select by the decoder's own probe, not a raw substring: the CODE view's content can be
   // base64-wrapped, and base64 never contains the literal marker, so a substring test would skip
   // an encoded view and drop a real result.
-  const view = views.find((candidate) => isRecord(candidate) && findNotebookModelValue(candidate.content) !== undefined);
+  const view = views.find(
+    (candidate) => isRecord(candidate) && findNotebookModelValue(candidate.content) !== undefined,
+  );
   return isRecord(view) ? exportedModelToRunPayload(view.content) : undefined;
 }
 
@@ -578,10 +658,22 @@ function lastRunParameters(run: Record<string, unknown>): Record<string, string>
   }
   const params: Record<string, string> = {};
   for (const [name, value] of Object.entries(overriding.notebook_params)) {
-    if (name === TARGET_NODE_PARAM || typeof value !== 'string') {
+    if (
+      name === TARGET_NODE_PARAM ||
+      name === DISPLAY_OUTPUTS_FOR_PARAM ||
+      name === COLLECT_ROW_COUNTS_PARAM ||
+      name === APP_VIEWER_PARAM ||
+      typeof value !== 'string'
+    ) {
       continue;
     }
-    params[name] = value;
+    const isFile = cachedManifest?.parameters.some((parameter) => parameter.name === name && parameter.type === 'file');
+    if (isFile) {
+      const reference = `upload:${value.split('/').at(-2)}`;
+      params[name] = UPLOAD_REFERENCE.test(reference) ? reference : '';
+    } else {
+      params[name] = value;
+    }
   }
   return params;
 }
@@ -627,7 +719,7 @@ function summarizeRunHistory(runs: unknown, windowSize: number) {
     return { entries: [], hasMore: false };
   }
   const records = runs.filter(isRecord);
-  const hasMore = runs.length > windowSize;
+  const hasMore = records.length > windowSize;
   records.sort((a, b) => historyStartedAt(b) - historyStartedAt(a));
   const entries: RunSummary[] = [];
   for (const record of records) {
@@ -650,11 +742,75 @@ function resolveHistoryWindow(raw: unknown) {
   return Math.min(parsed, RUN_HISTORY_MAX_WINDOW);
 }
 
-createApp({
+let activeUploads = 0;
 
+await createApp({
   plugins: [server()],
   onPluginsReady: async (appkit) => {
     appkit.server.extend((app) => {
+      // These responses contain per-viewer filenames and results, never shared cache entries.
+      app.use('/api/designer', (_req, res, next) => {
+        res.setHeader('Cache-Control', 'no-store');
+        next();
+      });
+
+      app.all('/api/designer/uploads/:parameterName', async (req, res) => {
+        let admitted = false;
+        try {
+          if (req.method !== 'GET' && req.method !== 'POST') {
+            res.status(405).json({ error: 'Method not allowed.' });
+            return;
+          }
+          const manifest = await loadManifest(true);
+          const parameter = manifest?.parameters.find(
+            ({ name, type }) => name === req.params.parameterName && type === 'file',
+          );
+          if (!parameter || !manifest?.uploads) {
+            res.status(404).json({ error: 'This app has no such file parameter.' });
+            return;
+          }
+          const viewer = requestViewer(req);
+          if (!viewer) {
+            res.status(401).json({ error: 'Sign in through Databricks Apps to upload files.' });
+            return;
+          }
+          const store = appKitUploadStore(manifest.uploads);
+          if (req.method === 'GET') {
+            res.json({ uploads: await listUploads(store, manifest.uploads, viewer, parameter.name) });
+            return;
+          }
+          if (req.get('content-type') !== 'application/octet-stream')
+            throw new UploadError(415, 'Upload the file as an octet stream.');
+          if (activeUploads >= 4) throw new UploadError(429, 'Uploads are busy. Try again shortly.');
+          const declaredSize = Number(req.get('content-length'));
+          if (declaredSize > manifest.uploads.maxFileSizeBytes)
+            throw new UploadError(413, 'The file exceeds the 25 MB upload limit.');
+          let filename: string;
+          try {
+            filename = decodeURIComponent(req.get('x-file-name') ?? '');
+          } catch {
+            throw new UploadError(400, 'The filename is invalid.');
+          }
+          activeUploads += 1;
+          admitted = true;
+          const bytes = await readUploadBytes(req, manifest.uploads.maxFileSizeBytes);
+          res
+            .status(201)
+            .json({ upload: await saveUpload(store, manifest.uploads, viewer, parameter.name, filename, bytes) });
+        } catch (error) {
+          req.resume();
+          res
+            .status(error instanceof UploadError ? error.status : 502)
+            .json({
+              error:
+                error instanceof UploadError
+                  ? error.message
+                  : 'Could not store the upload. Check the app volume resource and permissions.',
+            });
+        } finally {
+          if (admitted) activeUploads -= 1;
+        }
+      });
 
       app.get('/api/designer/config', async (_req, res) => {
         try {
@@ -674,7 +830,7 @@ createApp({
         }
       });
 
-      app.get('/api/designer/last-run', async (_req, res) => {
+      app.get('/api/designer/last-run', async (req, res) => {
         if (JOB_ID === undefined) {
           res.json({ status: 'noJob' });
           return;
@@ -682,9 +838,9 @@ createApp({
 
         let listed = [];
         try {
-
           listed = await retryRead(async () => {
             const collected = [];
+            let scanned = 0;
 
             // completed_only includes failures. Keep paging until the newest success is in hand so
             // a run of recent failures doesn't hide an older success, bounded by LAST_RUN_SCAN_CAP.
@@ -694,9 +850,13 @@ createApp({
               expand_tasks: true,
               limit: LAST_RUN_PAGE_SIZE,
             })) {
-              collected.push(run);
+              const visible = await accessibleRun(run, req, true);
+              if (visible) {
+                collected.push(visible);
+                if (isSuccessfulRun(visible)) break;
+              }
 
-              if (isSuccessfulRun(run) || collected.length >= LAST_RUN_SCAN_CAP) {
+              if (++scanned >= LAST_RUN_SCAN_CAP) {
                 break;
               }
             }
@@ -710,9 +870,9 @@ createApp({
 
         let active;
         try {
-
           // Trust active_only instead of duplicating Jobs lifecycle-state logic.
           const activeRuns = [];
+          let scannedActive = 0;
           // DELIBERATELY NOT WRAPPED in retryRead; this best-effort signal must not delay primary content.
           for await (const candidate of wsClient().jobs.listRuns({
             job_id: Number(JOB_ID),
@@ -720,8 +880,11 @@ createApp({
             expand_tasks: true,
             limit: ACTIVE_RUN_SCAN_LIMIT,
           })) {
-            activeRuns.push(candidate);
-            if (activeRuns.length >= ACTIVE_RUN_SCAN_LIMIT) {
+            const visible = await accessibleRun(candidate, req, true);
+            if (visible) {
+              activeRuns.push(visible);
+            }
+            if (++scannedActive >= LAST_RUN_SCAN_CAP || activeRuns.length >= ACTIVE_RUN_SCAN_LIMIT) {
               break;
             }
           }
@@ -743,7 +906,6 @@ createApp({
         const run = selectLastSuccessfulRun(listed);
         const summary = run === undefined ? undefined : summarizeLastRun(run);
         if (run === undefined || summary === undefined) {
-
           res.json({ status: 'none', ...(active === undefined ? {} : { active }) });
           return;
         }
@@ -770,7 +932,6 @@ createApp({
           const payload = await readRunOutputPayload(summary.taskRunId);
           res.json({ ...found, result: matchRunOutputs(await declaredOutputs(), payload) });
         } catch (err) {
-
           res.json({
             ...found,
             result: { outcome: 'noPayload', reason: `Could not read the run output: ${errText(err)}` },
@@ -790,7 +951,12 @@ createApp({
             return;
           }
           const submitted = isRecord(req.body) && isRecord(req.body.params) ? req.body.params : {};
-          const resolved = resolveRunParameters(manifest, submitted);
+          const resolved = await resolveRunParameters(
+            manifest,
+            submitted,
+            requestViewer(req),
+            appKitUploadStore(manifest.uploads),
+          );
           if (!resolved.ok) {
             res.status(400).json({ error: resolved.error });
             return;
@@ -825,7 +991,7 @@ createApp({
           return;
         }
 
-        if (!runBelongsToJob(run, JOB_ID)) {
+        if (!(await accessibleRun(run, req))) {
           res.status(404).json({ error: `Run ${jobRunId} is not a run of this app.` });
           return;
         }
@@ -835,8 +1001,7 @@ createApp({
         // A run carrying a result_state has finished even if its lifecycle value is absent or one
         // this list does not know yet, so treat that as terminal rather than polling it forever.
         const terminal =
-          (lifeCycleState != null && TERMINAL_LIFE_CYCLE_STATES.has(lifeCycleState)) ||
-          resultState != null;
+          (lifeCycleState != null && TERMINAL_LIFE_CYCLE_STATES.has(lifeCycleState)) || resultState != null;
         const snapshot = {
           jobRunId,
           taskRunId: idFrom(run.tasks?.[0]?.run_id),
@@ -901,13 +1066,12 @@ createApp({
           res.status(502).json({ error: `Could not read run ${jobRunId}: ${errText(err)}` });
           return;
         }
-        if (!runBelongsToJob(run, JOB_ID)) {
+        if (!(await accessibleRun(run, req))) {
           res.status(404).json({ error: `Run ${jobRunId} is not a run of this app.` });
           return;
         }
 
         try {
-
           // Never retry writes; polling settles cancellation from the run's own state.
           await wsClient().jobs.cancelRun({ run_id: Number(jobRunId) });
           res.json({ cancelled: true });
@@ -926,18 +1090,21 @@ createApp({
 
         let history = [];
         try {
-
           history = await retryRead(async () => {
             const collected = [];
+            let scanned = 0;
             // listRuns caps page size at 26; stop the generator once the requested window is full.
             for await (const run of wsClient().jobs.listRuns({
               job_id: Number(JOB_ID),
               completed_only: true,
               limit: RUN_HISTORY_PAGE_SIZE,
             })) {
-              collected.push(run);
+              const visible = await accessibleRun(run, req, true);
+              if (visible) {
+                collected.push(visible);
+              }
 
-              if (collected.length > windowSize) {
+              if (collected.length > windowSize || ++scanned >= LAST_RUN_SCAN_CAP) {
                 break;
               }
             }
@@ -956,7 +1123,6 @@ createApp({
     });
   },
 }).catch((err) => {
-
   console.error(err);
   process.exit(1);
 });

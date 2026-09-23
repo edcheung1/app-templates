@@ -9,10 +9,8 @@ Per-app differences are injected at deploy time rather than baked into the sourc
 - **Runner job** — bound as an app resource named `job`, surfaced to the server as the
   `DATABRICKS_JOB_ID` env var via `app.yaml`'s `valueFrom`.
 - **Manifest** (`designerApp.json`, which operators/parameters/markdown to render) — written by the
-  publish flow to a per-app workspace path and read at startup from
-  `${DESIGNER_MANIFEST_ROOT}/${DATABRICKS_JOB_ID}/designerApp.json`. It is keyed by the runner job id
-  because that is guaranteed present via the bound `job` resource; `DATABRICKS_APP_NAME` is not
-  reliably injected by the Apps runtime.
+  publish flow beside the runner notebook in its publisher-owned workspace folder. The server
+  derives that folder from the bound job's notebook path; no shared manifest root is needed.
 
 ## Layout
 
@@ -98,4 +96,44 @@ package proxy, but the committed lockfile must use `https://registry.npmjs.org/`
 package URLs so published apps do not depend on corporate network access. After dependency
 updates, normalize any proxy URLs in the lockfile without changing versions or integrity
 hashes; changing npm's registry setting alone does not rewrite existing lockfile URLs.
-The manifest and runner-job contracts are unchanged.
+Chart rendering does not change the manifest or runner-job contracts.
+
+## File upload parameters
+
+Manifest v4 adds `uploads: { volume, path, maxFileSizeBytes }` and parameter `type: "file"`.
+The server/client still read v3 for apps without uploads; a file parameter without valid v4
+storage is rejected, never downgraded to a text field or the author's original source path.
+Deploy this template before enabling Designer's `enableDesignerApps` flag; uploads share that gate.
+
+Designer provisions a per-app managed UC volume during publishing (or binds an author-selected
+existing volume). The `designer_uploads` App resource with `WRITE_VOLUME` gives the app service
+principal read/write access; the runner job's run-as principal also needs read access. Uploads
+use AppKit's Files plugin, not workspace files or app-container disk. No operator code changes are needed.
+The plugin is initialized lazily from the manifest in a backend-only AppKit instance (no server plugin).
+Its generic file-browser routes are never mounted; the Designer routes enforce viewer/parameter ownership.
+Upload, list, bounded sidecar reads, metadata, directory creation, and deletion all use the plugin API.
+
+Viewers upload files up to 25 MiB, then click Run. Bytes are capped while reading, and the
+server limits concurrent upload requests to four. A completed upload gets an immutable generated
+directory preserving the original filename and a persisted sidecar; only completed uploads can become
+job input. The browser holds an opaque upload reference, not an arbitrary volume path. It can also select one of up to 100 saved
+uploads for that viewer/parameter. Uploads are format-agnostic: the Source operator's configured
+format, read options (including Excel sheet/range), and expected columns are unchanged. Uploading
+a file does not infer or change that format; schema/parse errors are reported by the normal job run.
+
+The app requires the authenticated `x-forwarded-user` header supplied by Databricks Apps ingress.
+Do not expose this server directly to untrusted traffic that can supply its own identity headers.
+There is no anonymous/local-development fallback. Uploads are partitioned by job, viewer and
+parameter. Run submissions carry a server-owned `_lb_app_viewer` parameter; history, result reads,
+and cancellation enforce it even if upload controls are later removed. Existing users with
+direct Jobs or UC permissions, and volume owners/admins, are outside this in-app isolation boundary.
+
+Files are retained until the volume owner deletes them. There is no automatic expiration, consumer
+delete action, or deletion of storage when an App is deleted. Retained files can be selected again
+after a reload/restart. Manual cleanup must account for queued, running and retrying jobs.
+Storage paths cannot be changed by republishing, so old references stay bound to the same volume.
+
+`npm test` covers storage completion/partial failures, limits, parameter resolution and ownership
+policy with an in-memory storage boundary, plus server-route access checks and history hydration.
+Actual Apps ingress, UC provisioning/grants and Jobs
+execution still require a deployed smoke test; a local build alone does not validate those services.

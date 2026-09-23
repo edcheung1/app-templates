@@ -1,11 +1,11 @@
-
 import { CONFIG_ROUTE } from './routes';
+import { parseUploads, UPLOAD_REFERENCE, type AppUploads } from '../../shared/uploadConfig';
 
 export const APP_MANIFEST_VERSION = 3;
 
 export const TARGET_NODE_PARAM = 'target_node';
 
-export type AppParameterType = 'text' | 'number' | 'dropdown';
+export type AppParameterType = 'text' | 'number' | 'dropdown' | 'file';
 
 export type AppParameter = {
   name: string;
@@ -53,6 +53,7 @@ export type AppMarkdownBlock = {
 export type AppManifestBlock = AppMarkdownBlock | AppOutputBlock;
 
 export type AppManifest = {
+  uploads?: AppUploads;
   version: number;
   appName: string;
   subtitle?: string;
@@ -67,19 +68,22 @@ export type NotRunnableReason = 'noManifest' | 'noJob';
 
 export type AppConfigState =
   | { status: 'loading' }
-
   | { status: 'ready'; manifest: AppManifest; runnable: boolean; notRunnableReason?: NotRunnableReason }
-
   | { status: 'unavailable'; detail: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const isParameterType = (value: unknown): value is AppParameterType =>
-  value === 'text' || value === 'number' || value === 'dropdown';
+  value === 'text' || value === 'number' || value === 'dropdown' || value === 'file';
 
 function parseProvenance(raw: unknown): AppProvenance | undefined {
-  if (!isRecord(raw) || typeof raw.publishedAt !== 'number' || !Number.isFinite(raw.publishedAt) || raw.publishedAt <= 0) {
+  if (
+    !isRecord(raw) ||
+    typeof raw.publishedAt !== 'number' ||
+    !Number.isFinite(raw.publishedAt) ||
+    raw.publishedAt <= 0
+  ) {
     return undefined;
   }
   return { ...raw, publishedAt: raw.publishedAt };
@@ -89,7 +93,7 @@ export function parseAppManifest(raw: unknown): AppManifest | undefined {
   if (!isRecord(raw)) {
     return undefined;
   }
-  if (raw.version !== APP_MANIFEST_VERSION) {
+  if (raw.version !== APP_MANIFEST_VERSION && raw.version !== 4) {
     return undefined;
   }
   if (typeof raw.appName !== 'string' || raw.appName === '') {
@@ -104,7 +108,15 @@ export function parseAppManifest(raw: unknown): AppManifest | undefined {
   if (!Array.isArray(raw.parameters)) {
     return undefined;
   }
+  const uploads = parseUploads(raw.uploads);
+  if (
+    (raw.version === 4 && !uploads) ||
+    (raw.version === 3 && raw.uploads !== undefined) ||
+    (raw.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !uploads)
+  )
+    return undefined;
   return {
+    ...(uploads === undefined ? {} : { uploads }),
     version: raw.version,
     appName: raw.appName,
     ...(typeof raw.subtitle === 'string' && raw.subtitle !== '' ? { subtitle: raw.subtitle } : {}),
@@ -169,12 +181,14 @@ function parseParameter(entry: Record<string, unknown>): AppParameter[] {
   if (typeof entry.name !== 'string' || entry.name === '' || typeof entry.label !== 'string') {
     return [];
   }
-  if (entry.name === TARGET_NODE_PARAM) {
+  if (entry.name === TARGET_NODE_PARAM || entry.name === 'ld_display_outputs_for' || entry.name.startsWith('_lb_')) {
     return [];
   }
   const declared = isParameterType(entry.type) ? entry.type : 'text';
   const choices =
-    Array.isArray(entry.choices) && entry.choices.length > 0 && entry.choices.every((choice): choice is string => typeof choice === 'string')
+    Array.isArray(entry.choices) &&
+    entry.choices.length > 0 &&
+    entry.choices.every((choice): choice is string => typeof choice === 'string')
       ? entry.choices
       : undefined;
 
@@ -184,7 +198,7 @@ function parseParameter(entry: Record<string, unknown>): AppParameter[] {
       name: entry.name,
       label: entry.label,
       type,
-      defaultValue: typeof entry.defaultValue === 'string' ? entry.defaultValue : '',
+      defaultValue: type === 'file' ? '' : typeof entry.defaultValue === 'string' ? entry.defaultValue : '',
       ...(type === 'dropdown' && choices !== undefined ? { choices } : {}),
       ...(typeof entry.help === 'string' && entry.help !== '' ? { help: entry.help } : {}),
     },
@@ -198,6 +212,10 @@ export function initialValuesFor(
   const values: Record<string, string> = {};
   for (const parameter of manifest.parameters) {
     const recorded = lastRunParameters?.[parameter.name];
+    if (parameter.type === 'file') {
+      values[parameter.name] = recorded && UPLOAD_REFERENCE.test(recorded) ? recorded : '';
+      continue;
+    }
     values[parameter.name] = recorded === undefined || recorded === '' ? parameter.defaultValue : recorded;
   }
   return values;

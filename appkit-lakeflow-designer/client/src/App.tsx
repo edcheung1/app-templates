@@ -1,4 +1,4 @@
-import type { LiHTMLAttributes } from 'react';
+import type { LiHTMLAttributes, SetStateAction } from 'react';
 import { Suspense, useEffect, useRef, useState } from 'react';
 import type { Components, Options } from 'react-markdown';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
@@ -373,7 +373,7 @@ export function App() {
 
   const { manifest, runnable, notRunnableReason } = config;
   const outputsLabel = describeOutputs(manifest.blocks);
-  const changeValues = (next: Record<string, string>) => {
+  const changeValues = (next: SetStateAction<Record<string, string>>) => {
     formUntouched.current = false;
     setValues(next);
   };
