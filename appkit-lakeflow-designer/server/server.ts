@@ -13,7 +13,7 @@ import { appKitUploadStore } from './uploadStore';
 import { isReservedParameter, resolveRunParameters } from './runParameters';
 import { isExportRun, manifestRevision, registerExportRoutes } from './exports';
 import { appKitExportStore } from './exportStore';
-import { APP_REVISION_PARAM } from '../shared/exportConfig';
+import { APP_REVISION_PARAM, isExecutionPlan } from '../shared/exportConfig';
 
 // Each published app's manifest is written by the publish flow beside the runner notebook, in the
 // app's own publisher-owned folder (not a shared, world-writable root), and read at startup via the
@@ -58,6 +58,7 @@ type AppBlock =
       nodeId: string;
       port: string;
       chartSpec?: Record<string, unknown>;
+      executionNodeIds?: string[];
     };
 type AppManifest = {
   exports?: boolean;
@@ -333,6 +334,9 @@ function parseBlocks(raw: unknown): AppBlock[] {
       label: typeof entry.label === 'string' ? entry.label : '',
       nodeId: typeof entry.nodeId === 'string' ? entry.nodeId : '',
       port: typeof entry.port === 'string' ? entry.port : '',
+      ...(typeof entry.nodeId === 'string' && isExecutionPlan(entry.executionNodeIds, entry.nodeId)
+        ? { executionNodeIds: [...entry.executionNodeIds] }
+        : {}),
       ...(chartSpec === undefined ? {} : { chartSpec }),
     });
   }
@@ -775,6 +779,12 @@ await createApp({
           const job = await wsClient().jobs.get({ job_id: Number(JOB_ID) });
           const tasks = job.settings?.tasks;
           return tasks?.length === 1 ? tasks[0].notebook_task?.notebook_path : undefined;
+        },
+        notebookSource: async (path) => {
+          const exported = await wsClient().toLegacyWorkspaceClient().workspace.export({ path, format: 'SOURCE' });
+          return typeof exported.content === 'string'
+            ? Buffer.from(exported.content, 'base64').toString('utf8')
+            : undefined;
         },
         getRun: (run_id) => wsClient().jobs.getRun({ run_id }),
         start: async (notebook_params, idempotency_token) => {

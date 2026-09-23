@@ -11,6 +11,7 @@ let exportedModelToRunPayload;
 let parseRunOutcome;
 let ResultFooter;
 let ResultGrid;
+let OutputSection;
 let outputDirectory;
 const ROW_COUNTS_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.row-counts+json';
 
@@ -23,6 +24,7 @@ before(async () => {
       payload: 'client/src/payload.ts',
       ResultFooter: 'client/src/ResultFooter.tsx',
       ResultGrid: 'client/src/ResultGrid.tsx',
+      App: 'client/src/App.tsx',
     },
     config: false,
     tsconfig: 'tsconfig.client.json',
@@ -36,6 +38,7 @@ before(async () => {
   ({ parseRunOutcome } = await import(pathToFileURL(join(outputDirectory, 'payload.mjs')).href));
   ({ ResultFooter } = await import(pathToFileURL(join(outputDirectory, 'ResultFooter.mjs')).href));
   ({ ResultGrid } = await import(pathToFileURL(join(outputDirectory, 'ResultGrid.mjs')).href));
+  ({ OutputSection } = await import(pathToFileURL(join(outputDirectory, 'App.mjs')).href));
 });
 
 after(async () => {
@@ -80,6 +83,71 @@ function parsePayload(payload) {
 function footer(payload) {
   return renderToStaticMarkup(createElement(ResultFooter, { payload }));
 }
+
+function outputSection(payload, chartSpec, downloads = true) {
+  return renderToStaticMarkup(createElement(OutputSection, {
+    output: {
+      key: 'output',
+      title: 'Published output',
+      undeclared: false,
+      chartSpec,
+      outcome: { outcome: 'result', payload },
+    },
+    onRetry: () => {},
+    exportRequest: downloads ? { sourceRunId: '42', outputId: 'output' } : undefined,
+  }));
+}
+
+test('tabular outputs retain their row count and enabled download controls', () => {
+  const payload = parsePayload(outputFromTable(displayTable(2, false)));
+  const html = outputSection(payload);
+  assert.match(html, /<table/);
+  assert.match(html, />2 rows</);
+  assert.match(html, />Generate CSV</);
+  assert.match(html, />Generate Excel</);
+  assert.match(html, /Recomputes this output/);
+
+  const withoutDownloads = outputSection(payload, undefined, false);
+  assert.match(withoutDownloads, />2 rows</);
+  assert.doesNotMatch(withoutDownloads, /Generate CSV|Generate Excel|Recomputes this output/);
+});
+
+for (const widgetType of ['line', 'pie', 'unsupported']) {
+  test(`${widgetType} visualization hides row counts and download controls, including empty results`, () => {
+    const chartSpec = {
+      widgetType,
+      encodings: {
+        x: { fieldName: 'value', scale: { type: 'quantitative' } },
+        y: { fieldName: 'value', scale: { type: 'quantitative' } },
+        color: { fieldName: 'value', scale: { type: 'categorical' } },
+        angle: { fieldName: 'value', scale: { type: 'quantitative' } },
+      },
+    };
+    for (const rowCount of [0, 2]) {
+      const payload = parsePayload(outputFromTable(displayTable(rowCount, false)));
+      const html = outputSection(payload, chartSpec);
+      assert.match(html, /Published output/);
+      assert.doesNotMatch(html, />[\d,]+ rows(?: shown)?</);
+      assert.doesNotMatch(html, /Generate CSV|Generate Excel|Recomputes this output/);
+      if (rowCount === 0) assert.match(html, /No rows returned/);
+      else if (widgetType === 'unsupported') assert.match(html, /<table/);
+    }
+  });
+}
+
+test('visualizations retain their truncated-data warning without the table footer or downloads', () => {
+  const payload = parsePayload(outputFromTable(displayTable(2, true)));
+  const html = outputSection(payload, {
+    widgetType: 'line',
+    encodings: {
+      x: { fieldName: 'value', scale: { type: 'quantitative' } },
+      y: { fieldName: 'value', scale: { type: 'quantitative' } },
+    },
+  });
+  assert.match(html, /This chart is drawn from part of the result/);
+  assert.doesNotMatch(html, />2 rows shown</);
+  assert.doesNotMatch(html, /Generate CSV|Generate Excel|Recomputes this output/);
+});
 
 test('preserves notebook overflow without inventing a full count or a row-limit cause', () => {
   for (const rowCount of [0, 17, 1000, 1500]) {

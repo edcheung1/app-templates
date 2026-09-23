@@ -33,11 +33,17 @@ async function harness(t) {
     exports: true,
     storage: { volume: 'main.apps.data', path: '/Volumes/main/apps/data/designer_apps/app1' },
     parameters: [{ name: 'value' }],
-    blocks: [{ type: 'output', id: 'out', nodeId: 'source', port: 'data' }],
+    blocks: [
+      { type: 'output', id: 'out', nodeId: 'source', port: 'data', executionNodeIds: ['ancestor', 'source'] },
+    ],
   };
   const state = {
     manifest,
     notebookPath,
+    notebookSource: ['ancestor', 'source', 'other'].map((node) =>
+      `if _lb_app_runtime is None or _lb_app_runtime.should_run("${node}"):\n    _lb_app_runtime.on_output("${node}", {})`,
+    ).join('\n'),
+    sourceReads: [],
     starts: [],
     cancelled: [],
     reports: [],
@@ -92,6 +98,7 @@ async function harness(t) {
     manifest: async () => state.manifest,
     viewer: (req) => req.get('x-viewer'),
     notebookPath: async () => state.notebookPath,
+    notebookSource: async (path) => { state.sourceReads.push(path); return state.notebookSource; },
     getRun: async (id) => runs.get(id),
     start: async (params, token) => {
       state.starts.push({ params, token });
@@ -151,6 +158,64 @@ test('replays recorded parameters idempotently and separates export runs from pr
   assert.equal(isExportRun(h.runs.get(2)), true);
   assert.equal(isExportRun(h.runs.get(1)), false);
   assert.equal((await (await h.call(`/${first.exportId}`)).json()).phase, 'running');
+});
+
+test('passes only the selected output plan from the publication, ignoring browser overrides', async (t) => {
+  const h = await harness(t);
+  h.state.manifest.blocks.push({
+    type: 'output', id: 'other', nodeId: 'other', port: 'data', executionNodeIds: ['ancestor', 'other'],
+  });
+  h.runs.get(1).overriding_parameters.notebook_params._lb_app_revision = manifestRevision(h.state.manifest);
+  const response = await h.start({ outputId: 'other', executionNodeIds: ['source', 'injected'] });
+  assert.equal(response.status, 202);
+  assert.deepEqual(JSON.parse(h.state.starts[0].params._lb_export_request).executionNodeIds, ['ancestor', 'other']);
+  assert.equal(h.state.starts[0].params.ld_display_outputs_for, '');
+});
+
+for (const plan of [undefined, null, [], ['ancestor'], ['source', 'source'], ['source', ''], ['source', 2], 'source']) {
+  test(`refuses invalid published execution plan ${JSON.stringify(plan)} before submitting a Job`, async (t) => {
+    const h = await harness(t);
+    h.state.manifest.blocks[0].executionNodeIds = plan;
+    const response = await h.start();
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /Republish/);
+    assert.deepEqual(h.state.starts, []);
+    assert.equal(h.files.size, 0);
+  });
+}
+
+test('requires a new source run after the published execution plan changes', async (t) => {
+  const h = await harness(t);
+  h.state.manifest.blocks[0].executionNodeIds = ['different', 'source'];
+  assert.equal((await h.start()).status, 409);
+  assert.deepEqual(h.state.starts, []);
+});
+
+test('rejects a mixed legacy runner missing the selected output hook before starting compute', async (t) => {
+  const h = await harness(t);
+  h.state.notebookSource = 'out = run(config, inputs, spark)\nctx["source.data"] = out["data"]\n_lb_app_runtime.on_output("other", {})';
+  const response = await h.start();
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /Republish/);
+  assert.deepEqual(h.state.sourceReads, [h.state.notebookPath]);
+  assert.deepEqual(h.state.starts, []);
+  assert.equal(h.files.size, 0);
+});
+
+test('rejects a runner whose ancestor no longer has the execution gate', async (t) => {
+  const h = await harness(t);
+  h.state.notebookSource = h.state.notebookSource.replace('.should_run("ancestor")', '.old_gate("ancestor")');
+  assert.equal((await h.start()).status, 409);
+  assert.deepEqual(h.state.starts, []);
+});
+
+test('rejects plans that exceed the Jobs parameter budget before creating request files', async (t) => {
+  const h = await harness(t);
+  h.state.manifest.blocks[0].executionNodeIds = ['n'.repeat(10_000), 'source'];
+  h.runs.get(1).overriding_parameters.notebook_params._lb_app_revision = manifestRevision(h.state.manifest);
+  assert.equal((await h.start()).status, 400);
+  assert.deepEqual(h.state.starts, []);
+  assert.equal(h.files.size, 0);
 });
 
 for (const [name, mutate, status] of [

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -89,7 +90,10 @@ const manifest = {
 async function serverHarness() {
   const routes = new Map();
   const middleware = [];
-  const state = { manifest, runs: [], listed: [], reads: [], cancelled: [], outputReads: [], submissions: [], apps: [] };
+  const state = {
+    manifest, runs: [], listed: [], reads: [], cancelled: [], outputReads: [], submissions: [], apps: [],
+    notebookPath: '/Users/author/app/runner', notebookSource: '', workspaceReads: [],
+  };
   const stored = new Map();
   globalThis[harnessKey] = {
     apps: state.apps,
@@ -128,7 +132,7 @@ async function serverHarness() {
     },
     client: {
       jobs: {
-        get: async () => ({ settings: { tasks: [{ notebook_task: { notebook_path: '/Users/author/app/runner' } }] } }),
+        get: async () => ({ settings: { tasks: [{ notebook_task: { notebook_path: state.notebookPath } }] } }),
         getRun: async ({ run_id }) => {
           state.reads.push(run_id);
           return state.runs.find((run) => run.run_id === run_id);
@@ -162,7 +166,11 @@ async function serverHarness() {
       },
       toLegacyWorkspaceClient: () => ({
         workspace: {
-          export: async () => ({ content: Buffer.from(JSON.stringify(state.manifest)).toString('base64') }),
+          export: async ({ path, format }) => {
+            state.workspaceReads.push({ path, format });
+            const content = path === state.notebookPath ? state.notebookSource : JSON.stringify(state.manifest);
+            return { content: Buffer.from(content).toString('base64') };
+          },
         },
       }),
     },
@@ -287,6 +295,55 @@ test('rejects unsupported manifest versions and malformed optional storage', asy
     state.manifest = invalid;
     assert.equal((await request('post', '/api/designer/run')).status, 409);
   }
+  assert.deepEqual(state.submissions, []);
+});
+
+test('preserves published execution plans through the server manifest projection', async () => {
+  const { state, request } = await serverHarness();
+  state.manifest = {
+    ...manifest, exports: true,
+    blocks: [{ ...manifest.blocks[0], executionNodeIds: ['ancestor', 'source'] }],
+  };
+  const response = await request('get', '/api/designer/config');
+  assert.deepEqual(response.body.manifest.blocks[0].executionNodeIds, ['ancestor', 'source']);
+});
+
+test('does not accept a malformed execution plan from the stored manifest', async () => {
+  const { state, request } = await serverHarness();
+  state.manifest = {
+    ...manifest, exports: true,
+    blocks: [{ ...manifest.blocks[0], executionNodeIds: ['ancestor'] }],
+  };
+  const response = await request('get', '/api/designer/config');
+  assert.equal(response.body.manifest.blocks[0].executionNodeIds, undefined);
+});
+
+test('reads the actual runner source and refuses a legacy target before starting an export job', async () => {
+  const { state, request } = await serverHarness();
+  state.notebookPath = `/Users/author/app/runner-${'b'.repeat(64)}.designer.py`;
+  state.notebookSource = 'display(ctx["source.data"])';
+  state.manifest = {
+    ...manifest, exports: true, parameters: [],
+    blocks: [{ ...manifest.blocks[0], executionNodeIds: ['source'] }],
+  };
+  const configured = await request('get', '/api/designer/config');
+  const revision = createHash('sha256').update(JSON.stringify(configured.body.manifest)).digest('hex');
+  state.runs = [{
+    ...run(10, 'alice', { _lb_app_revision: revision }),
+    tasks: [{ run_id: 1010, notebook_task: { notebook_path: state.notebookPath } }],
+  }];
+
+  const response = await request('post', '/api/designer/exports', {
+    body: {
+      sourceRunId: '10', outputId: 'data', format: 'csv',
+      requestId: '11111111-1111-4111-8111-111111111111',
+    },
+  });
+  assert.equal(response.status, 409);
+  assert.match(response.body.error, /outdated or modified export code/);
+  assert.deepEqual(state.workspaceReads.filter(({ path }) => path === state.notebookPath), [
+    { path: state.notebookPath, format: 'SOURCE' },
+  ]);
   assert.deepEqual(state.submissions, []);
 });
 

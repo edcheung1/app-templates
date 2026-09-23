@@ -6,6 +6,7 @@ import {
   APP_REVISION_PARAM,
   EXPORT_REQUEST_PARAM,
   isExportFormat,
+  isExecutionPlan,
   type ExportFormat,
   type ExportStatus,
 } from '../shared/exportConfig';
@@ -36,7 +37,7 @@ export const isExportRun = (run: unknown): boolean => typeof runParameters(run)[
 interface ExportManifest {
   exports?: boolean;
   storage?: AppStorage;
-  blocks: { type: string; id?: string; nodeId?: string; port?: string }[];
+  blocks: { type: string; id?: string; nodeId?: string; port?: string; executionNodeIds?: string[] }[];
   parameters: { name: string }[];
 }
 interface ExportRequest {
@@ -46,13 +47,22 @@ interface ExportRequest {
   viewer: string;
   revision: string;
   params: Record<string, string>;
-  instruction: { id: string; root: string; nodeId: string; port: string; format: ExportFormat; notebookPath: string };
+  instruction: {
+    id: string;
+    root: string;
+    nodeId: string;
+    port: string;
+    format: ExportFormat;
+    notebookPath: string;
+    executionNodeIds: string[];
+  };
 }
 export interface ExportDependencies {
   jobId: string | undefined;
   manifest(): Promise<ExportManifest | undefined>;
   viewer(req: Request): string | undefined;
   notebookPath(): Promise<string | undefined>;
+  notebookSource(path: string): Promise<string | undefined>;
   getRun(id: number): Promise<unknown>;
   start(params: Record<string, string>, idempotencyToken: string): Promise<number>;
   cancel(id: number): Promise<void>;
@@ -93,6 +103,7 @@ function validRequest(value: unknown, id: string, viewer: string, root: string):
     instruction.root === root &&
     isExportFormat(instruction.format) &&
     typeof instruction.nodeId === 'string' &&
+    isExecutionPlan(instruction.executionNodeIds, instruction.nodeId) &&
     typeof instruction.port === 'string' &&
     typeof instruction.notebookPath === 'string' &&
     typeof value.revision === 'string' &&
@@ -204,6 +215,8 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
         throw new ExportError(400, 'Choose a run, published output, and CSV or Excel format.');
       const block = ctx.manifest.blocks.find((entry) => entry.type === 'output' && entry.id === body.outputId);
       if (!block?.nodeId || !block.port) throw new ExportError(400, 'This output is not published by the app.');
+      if (!isExecutionPlan(block.executionNodeIds, block.nodeId))
+        throw new ExportError(409, 'This output has no valid export execution plan. Republish the app.');
       const source = await deps.getRun(Number(body.sourceRunId));
       if (
         !record(source) ||
@@ -245,6 +258,7 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
         port: block.port,
         format: body.format,
         notebookPath,
+        executionNodeIds: block.executionNodeIds,
       };
       const request: ExportRequest = {
         exportId,
@@ -257,23 +271,36 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
       };
       if (Buffer.byteLength(JSON.stringify(request)) > 48 * 1024)
         throw new ExportError(400, 'The recorded run parameters are too large to export.');
+      const notebookParams = {
+        ...params,
+        [APP_VIEWER_PARAM]: ctx.viewer,
+        [APP_REVISION_PARAM]: revision,
+        ld_display_outputs: 'false',
+        ld_display_outputs_for: '',
+        _lb_collect_row_counts: 'false',
+        [EXPORT_REQUEST_PARAM]: JSON.stringify(instruction),
+      };
+      // Jobs run-now limits notebook_params to 10,000 serialized bytes.
+      if (Buffer.byteLength(JSON.stringify(notebookParams)) > 10_000)
+        throw new ExportError(400, 'The execution plan and recorded parameters are too large to export.');
+      // A content-addressed path can still be edited by its owner (including Designer
+      // regeneration). Check the actual code before paying for a no-op export run.
+      const notebookSource = await deps.notebookSource(notebookPath);
+      const targetHook = `_lb_app_runtime.on_output(${JSON.stringify(block.nodeId)},`;
+      if (
+        !notebookSource?.split('\n').some((line) => line.trimStart().startsWith(targetHook)) ||
+        !block.executionNodeIds.every((node) => notebookSource.includes(`.should_run(${JSON.stringify(node)})`))
+      )
+        throw new ExportError(
+          409,
+          'The runner notebook has outdated or modified export code. Republish the app, run it again, then retry the export.',
+        );
       await ctx.store.create(`${root}/request.json`, request);
       const saved = await ctx.store.read(`${root}/request.json`);
       if (!validRequest(saved, exportId, ctx.viewer, root) || JSON.stringify(saved) !== JSON.stringify(request))
         throw new ExportError(409, 'This request changed. Generate a new export.');
       if (!(await ctx.store.read(`${root}/submission.json`))) {
-        const runId = await deps.start(
-          {
-            ...params,
-            [APP_VIEWER_PARAM]: ctx.viewer,
-            [APP_REVISION_PARAM]: revision,
-            ld_display_outputs: 'false',
-            ld_display_outputs_for: '',
-            _lb_collect_row_counts: 'false',
-            [EXPORT_REQUEST_PARAM]: JSON.stringify(instruction),
-          },
-          exportId,
-        );
+        const runId = await deps.start(notebookParams, exportId);
         await ctx.store.create(`${root}/submission.json`, { runId });
       }
       res.status(202).json({ exportId, phase: 'queued' });

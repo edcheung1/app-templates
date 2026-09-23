@@ -973,7 +973,7 @@ function OutputHeading({
   );
 }
 
-function OutputSection({ output, onRetry, exportRequest }: { output: MatchedOutput; onRetry: () => void; exportRequest?: { sourceRunId: string; outputId: string } }) {
+export function OutputSection({ output, onRetry, exportRequest }: { output: MatchedOutput; onRetry: () => void; exportRequest?: { sourceRunId: string; outputId: string } }) {
   const { outcome } = output;
   return (
     <section className="border-border border-t [&>*]:border-t-0">
@@ -981,7 +981,9 @@ function OutputSection({ output, onRetry, exportRequest }: { output: MatchedOutp
       {outcome.outcome === 'result' ? (
         <ResultSection payload={outcome.payload} chartSpec={output.chartSpec} />
       ) : null}
-      {outcome.outcome === 'result' && exportRequest && <ExportDownload key={`${exportRequest.sourceRunId}:${exportRequest.outputId}`} {...exportRequest} />}
+      {outcome.outcome === 'result' && output.chartSpec === undefined && exportRequest && (
+        <ExportDownload key={`${exportRequest.sourceRunId}:${exportRequest.outputId}`} {...exportRequest} />
+      )}
       {outcome.outcome === 'computeError' ? <ComputeError payload={outcome.payload} onRetry={onRetry} /> : null}
       {outcome.outcome === 'malformed' ? <MalformedOutput reason={outcome.reason} /> : null}
       {outcome.outcome === 'missing' ? <MissingOutput reason={outcome.reason} /> : null}
@@ -994,7 +996,7 @@ function ResultSection({ payload, chartSpec }: { payload: OkPayload; chartSpec?:
     return (
       <>
         <EmptyResult />
-        <ResultFooter payload={payload} />
+        {chartSpec === undefined && <ResultFooter payload={payload} />}
       </>
     );
   }
@@ -1011,7 +1013,6 @@ function ResultSection({ payload, chartSpec }: { payload: OkPayload; chartSpec?:
             <LazyOutputChart plan={chart.plan} rows={payload.rows} fallback={<ResultGrid payload={payload} />} />
           </Suspense>
         </div>
-        <ResultFooter payload={payload} />
       </>
     );
   }
@@ -1019,7 +1020,7 @@ function ResultSection({ payload, chartSpec }: { payload: OkPayload; chartSpec?:
     <>
       {chart === undefined ? null : <ChartRefusedNote refusal={chart.refusal} />}
       <ResultGrid payload={payload} />
-      <ResultFooter payload={payload} />
+      {chartSpec === undefined && <ResultFooter payload={payload} />}
     </>
   );
 }

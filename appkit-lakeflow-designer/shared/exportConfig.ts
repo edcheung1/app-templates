@@ -14,3 +14,10 @@ export interface ExportStatus {
 }
 
 export const isExportFormat = (value: unknown): value is ExportFormat => value === 'csv' || value === 'xlsx';
+
+export const isExecutionPlan = (value: unknown, nodeId: string): value is string[] =>
+  Array.isArray(value) &&
+  value.length > 0 &&
+  value.every((node) => typeof node === 'string' && node.trim() !== '') &&
+  new Set(value).size === value.length &&
+  value.includes(nodeId);

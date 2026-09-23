@@ -164,15 +164,29 @@ execution still require a deployed smoke test; a local build alone does not vali
 ## On-demand CSV and Excel downloads
 
 Authors enable full-data downloads in Designer's App storage settings; the manifest then has
-`exports: true`. Viewers choose Generate CSV or Generate Excel on a successful published output.
+`exports: true`. Viewers choose Generate CSV or Generate Excel on a successful published table output.
+Visualizations do not show download controls or a row-count footer, even when they fall back to a table.
 The App verifies run ownership, Job identity, output membership, and the current publication revision,
 then starts an idempotent export run using that source run's recorded parameters. Data is recomputed
 at export time, not retrieved from a historical snapshot. A stale publication requires a new App run.
 
+For download-enabled apps, each output block in `designerApp.json` contains `executionNodeIds`:
+the target and its ancestors, computed at publication with Designer's Run up to graph helper.
+The manifest remains beside the runner in Workspace files, not in the storage volume. The server
+passes the selected output's plan in `_lb_export_request`; the browser cannot choose execution nodes.
+Missing/invalid plans require republishing. Republish installs the updated manifest, helper, and runner;
+then run the App again before exporting. Oversized plans/parameters are rejected before Job submission.
+The server also checks the current runner source for the target export hook and execution guards;
+outdated or modified runners require republishing instead of starting a job that cannot export.
+Treat published runners as deployment artifacts: edit the original Designer document and republish.
+
 The Python helper lives in Universe alongside shared operator codegen, not in this Node.js app.
 Designer publishes a content-addressed `.py` file beside the runner notebook and pins the generated
 imports to it. The dormant hook also serves full row counts on ordinary App runs. Normal Designer
-runs do not import it. Export runs disable preview displays/counts, write just the selected output,
+runs do not import it. Every operator's wiring has a small `should_run(node_id)` guard; export runs skip
+unrelated config evaluation, input lookups, operator execution, checkpoints, and output hooks.
+Ordinary App runs still execute all published branches. Operator function definitions/imports remain
+at module scope. Export runs disable preview displays/counts, write just the selected output,
 then exit. The Job's run-as identity must read the helper and write to the volume; Excel generation
 additionally requires `openpyxl==3.1.5` in the Job environment.
 
