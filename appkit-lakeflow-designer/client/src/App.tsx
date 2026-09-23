@@ -554,7 +554,8 @@ export function App() {
           {state.phase === 'settled' && ownRunSucceeded && state.snapshot !== undefined ? (
             <LastRunLabel
               run={runHistoryEntryFromSnapshot(state.snapshot, state.startedAt)}
-              parameters={state.params}
+              parameters={state.snapshot.parameters ?? state.params}
+              parameterDisplayValues={state.snapshot.parameterDisplayValues}
               declared={manifest.parameters}
               variant="justFinished"
               finishedAt={ownFinishedAt}
@@ -651,6 +652,8 @@ function runHistoryEntryFromSnapshot(snapshot: RunSnapshot, startedAt: number | 
     ...(snapshot.runPageUrl === undefined ? {} : { runPageUrl: snapshot.runPageUrl }),
     ...(snapshot.resultState === undefined ? {} : { resultState: snapshot.resultState }),
     ...(snapshot.lifeCycleState === undefined ? {} : { lifeCycleState: snapshot.lifeCycleState }),
+    ...(snapshot.parameters === undefined ? {} : { parameters: snapshot.parameters }),
+    ...(snapshot.parameterDisplayValues === undefined ? {} : { parameterDisplayValues: snapshot.parameterDisplayValues }),
   };
 }
 

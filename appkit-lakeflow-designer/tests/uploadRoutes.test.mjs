@@ -4,10 +4,13 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { after, before, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'tsdown';
 
 let outputDirectory;
 let viewerKey;
+let parseRunSnapshot, LastRunLabel;
 let instance = 0;
 const harnessKey = Symbol.for('designer-upload-route-tests');
 const originalJobId = process.env.DATABRICKS_JOB_ID;
@@ -50,6 +53,18 @@ before(async () => {
     ],
   });
   ({ viewerKey } = await import(pathToFileURL(join(outputDirectory, 'fileUploads.mjs')).href));
+  await build({
+    entry: { payload: 'client/src/payload.ts', LastRunLabel: 'client/src/LastRunLabel.tsx' },
+    config: false,
+    tsconfig: 'tsconfig.client.json',
+    noExternal: [/^@databricks\/appkit-ui(?:\/|$)/],
+    outDir: outputDirectory,
+    clean: false,
+    outExtensions: () => ({ js: '.mjs' }),
+    logLevel: 'silent',
+  });
+  ({ parseRunSnapshot } = await import(pathToFileURL(join(outputDirectory, 'payload.mjs')).href));
+  ({ LastRunLabel } = await import(pathToFileURL(join(outputDirectory, 'LastRunLabel.mjs')).href));
 });
 
 after(async () => {
@@ -198,14 +213,31 @@ function run(id, owner, params = {}) {
   };
 }
 
-for (const filename of ['sales.csv', 'sales.xlsx', 'data.json', 'data.csv.gz']) {
-  test(`hydrates ${filename} history and hides other viewers`, async () => {
+for (const filename of ['sales.csv', 'sales.xlsx', 'data.json', 'data.csv.gz', 'carmax_car_prices copy (1).xlsx', 'データ.xlsx']) {
+  test(`shows ${filename} on completion without refreshing and preserves it in history`, async () => {
     const { state, request } = await serverHarness();
     state.runs = [
       run(20, 'bob'),
       run(10, 'alice', { path: `/Volumes/data/829dcaa7-e505-49c1-b6d0-73d1841e990a/${filename}` }),
     ];
     state.listed = state.runs.map(({ run_id, job_id }) => ({ run_id, job_id }));
+    const status = await request('get', '/api/designer/run/:jobRunId', { params: { jobRunId: '10' } });
+    assert.equal(status.status, 200);
+    const snapshot = parseRunSnapshot(status.body);
+    assert.equal(snapshot.terminal, true);
+    assert.deepEqual(snapshot.parameters, { path: 'upload:829dcaa7-e505-49c1-b6d0-73d1841e990a' });
+    assert.deepEqual(snapshot.parameterDisplayValues, { path: filename });
+    const html = renderToStaticMarkup(createElement(LastRunLabel, {
+      run: snapshot,
+      parameters: snapshot.parameters,
+      parameterDisplayValues: snapshot.parameterDisplayValues,
+      declared: manifest.parameters,
+      variant: 'justFinished',
+    }));
+    assert.match(html, /Just finished/);
+    assert.ok(html.includes(filename));
+    assert.doesNotMatch(html, /upload:|\/Volumes\//);
+
     const history = await request('get', '/api/designer/runs');
     assert.deepEqual(
       history.body.runs.map(({ jobRunId }) => jobRunId),
@@ -219,9 +251,30 @@ for (const filename of ['sales.csv', 'sales.xlsx', 'data.json', 'data.csv.gz']) 
     assert.equal(last.body.run.taskRunId, '1010');
     assert.deepEqual(last.body.parameters, { path: 'upload:829dcaa7-e505-49c1-b6d0-73d1841e990a' });
     assert.deepEqual(last.body.parameterDisplayValues, { path: filename });
-    assert.deepEqual(state.outputReads, [1010]);
+    assert.deepEqual(state.outputReads, [1010, 1010]);
   });
 }
+
+test('live status preserves ordinary parameters and leaves missing recorded values absent', async () => {
+  const { state, request } = await serverHarness();
+  state.manifest = {
+    ...manifest,
+    version: 3,
+    uploads: undefined,
+    parameters: [{ name: 'year', label: 'Year', type: 'text', defaultValue: '2015' }],
+  };
+  state.runs = [run(10, 'alice', { year: '2016', ld_display_outputs_for: 'source', _lb_collect_row_counts: 'true' })];
+  let response = await request('get', '/api/designer/run/:jobRunId', { params: { jobRunId: '10' } });
+  let snapshot = parseRunSnapshot(response.body);
+  assert.deepEqual(snapshot.parameters, { year: '2016' });
+  assert.equal(snapshot.parameterDisplayValues, undefined);
+
+  delete state.runs[0].overriding_parameters;
+  response = await request('get', '/api/designer/run/:jobRunId', { params: { jobRunId: '10' } });
+  snapshot = parseRunSnapshot(response.body);
+  assert.equal(snapshot.parameters, undefined);
+  assert.equal(snapshot.parameterDisplayValues, undefined);
+});
 
 test('enables plugin storage on republish and binds a completed upload to a run', async () => {
   const { state, request } = await serverHarness();

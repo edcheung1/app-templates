@@ -74,6 +74,8 @@ export type RunSnapshot = {
   executionDurationMs?: number;
   runPageUrl?: string;
   terminal: boolean;
+  parameters?: Record<string, string>;
+  parameterDisplayValues?: Record<string, string>;
 
   result?: RunOutcome;
 };
@@ -245,6 +247,14 @@ export function parseRunSnapshot(raw: unknown): RunSnapshot | undefined {
   if (executionDurationMs !== undefined) snapshot.executionDurationMs = executionDurationMs;
   const runPageUrl = nonEmptyString(raw.runPageUrl);
   if (runPageUrl !== undefined) snapshot.runPageUrl = runPageUrl;
+  for (const field of ['parameters', 'parameterDisplayValues'] as const) {
+    const values = raw[field];
+    if (isRecord(values)) {
+      snapshot[field] = Object.fromEntries(
+        Object.entries(values).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+      );
+    }
+  }
   const result = raw.result === undefined ? undefined : parseRunOutcome(raw.result);
   if (result !== undefined) snapshot.result = result;
   return snapshot;

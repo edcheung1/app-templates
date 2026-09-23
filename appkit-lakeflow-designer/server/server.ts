@@ -651,7 +651,7 @@ function summarizeLastRun(run: Record<string, unknown>): RunSummary | undefined 
   return summary;
 }
 
-function lastRunParameterData(
+function runParameterData(
   run: Record<string, unknown>,
 ): Pick<RunSummary, 'parameters' | 'parameterDisplayValues'> | undefined {
   const overriding = run.overriding_parameters;
@@ -720,7 +720,7 @@ function summarizeHistoryRun(run: Record<string, unknown>) {
   if (resultState !== undefined) summary.resultState = resultState;
   const lifeCycleState = lifeCycleStateOf(run);
   if (lifeCycleState !== undefined) summary.lifeCycleState = lifeCycleState;
-  const parameterData = lastRunParameterData(run);
+  const parameterData = runParameterData(run);
   if (parameterData !== undefined) Object.assign(summary, parameterData);
   return summary;
 }
@@ -908,7 +908,7 @@ await createApp({
           const activeRun = selectActiveRun(activeRuns);
           const activeSummary = activeRun === undefined ? undefined : summarizeLastRun(activeRun);
           if (activeRun !== undefined && activeSummary !== undefined) {
-            const activeParameterData = lastRunParameterData(activeRun);
+            const activeParameterData = runParameterData(activeRun);
             active = {
               run: activeSummary,
               ...activeParameterData,
@@ -927,7 +927,7 @@ await createApp({
           return;
         }
 
-        const parameterData = lastRunParameterData(run);
+        const parameterData = runParameterData(run);
 
         const found = {
           status: 'found',
@@ -1008,7 +1008,8 @@ await createApp({
           return;
         }
 
-        if (!(await accessibleRun(run, req))) {
+        const visibleRun = await accessibleRun(run, req);
+        if (visibleRun === undefined) {
           res.status(404).json({ error: `Run ${jobRunId} is not a run of this app.` });
           return;
         }
@@ -1029,6 +1030,7 @@ await createApp({
           executionDurationMs: run.execution_duration,
           runPageUrl: run.run_page_url,
           terminal,
+          ...runParameterData(visibleRun),
         };
 
         if (!terminal) {
