@@ -12,7 +12,7 @@ const directories = new Set();
 const config = {
   volume: 'main.default.uploads',
   path: '/Volumes/main/default/uploads/designer_uploads/app1',
-  maxFileSizeBytes: 25 * 1024 * 1024,
+  maxFileSizeBytes: 5 * 1024 * 1024 * 1024,
 };
 const originals = Object.fromEntries(
   ['NODE_ENV', 'DATABRICKS_WORKSPACE_ID', 'DATABRICKS_VOLUME_FILES', 'DISABLE_APPKIT_INTERNAL_TELEMETRY'].map(
@@ -40,7 +40,11 @@ before(async () => {
     assert.equal(options.headers.get('Authorization'), 'Bearer test-token');
     const path = decodeURIComponent(url.pathname.slice('/api/2.0/fs/files'.length));
     if (contents.has(path)) return new Response('Already exists', { status: 409 });
-    contents.set(path, Buffer.from(options.body));
+    const bytes =
+      options.body instanceof ReadableStream
+        ? Buffer.from(await new Response(options.body).arrayBuffer())
+        : Buffer.from(options.body);
+    contents.set(path, bytes);
     return new Response(null, { status: 204 });
   });
   await createApp({
@@ -125,6 +129,17 @@ test('uses the Files plugin for immutable storage, bounded records, metadata and
     await assert.rejects(store.put(path, Buffer.from('replacement')), { status: 502 });
     assert.deepEqual(contents.get(path), bytes);
   }
+  const streamedPath = `${folder}/streamed.csv`;
+  await store.putStream(
+    streamedPath,
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.from('streamed'));
+        controller.close();
+      },
+    }),
+  );
+  assert.equal(contents.get(streamedPath).toString(), 'streamed');
   await store.delete(`${folder}/data.csv`);
   await assert.rejects(store.read(`${folder}/data.csv`), { status: 404 });
 });

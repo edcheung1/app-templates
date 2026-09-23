@@ -7,7 +7,7 @@ import { labelFor } from './parameterLabels';
 
 // A landing run may belong to another consumer, so never imply ownership or offer cancellation.
 export function ActiveRunBanner({ active, declared }: { active: ActiveRun; declared: AppParameter[] }) {
-  const { run, parameters, lifeCycleState } = active;
+  const { run, parameters, parameterDisplayValues, lifeCycleState } = active;
   const entries = parameters === undefined ? [] : Object.entries(parameters);
   const startedAt = run.startTime;
 
@@ -58,7 +58,9 @@ export function ActiveRunBanner({ active, declared }: { active: ActiveRun; decla
           {entries.map(([name, value]) => (
             <span key={name} className="text-muted-foreground">
               <span>{labelFor(name, declared)}</span>
-              <span className="text-foreground ml-1 font-mono">{value === '' ? '(blank)' : value}</span>
+              <span className="text-foreground ml-1 font-mono">
+                {(parameterDisplayValues?.[name] ?? value) === '' ? '(blank)' : (parameterDisplayValues?.[name] ?? value)}
+              </span>
             </span>
           ))}
         </div>

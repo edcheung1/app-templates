@@ -45,6 +45,7 @@ export const relative = (endTime: number, now: number): string => {
 export function LastRunLabel({
   run,
   parameters,
+  parameterDisplayValues,
   declared,
   variant = 'last',
   finishedAt,
@@ -53,6 +54,7 @@ export function LastRunLabel({
   run: LastRunSummary;
 
   parameters?: Record<string, string>;
+  parameterDisplayValues?: Record<string, string>;
 
   declared: AppParameter[];
   variant?: LastRunVariant;
@@ -103,7 +105,9 @@ export function LastRunLabel({
           {entries.map(([name, value]) => (
             <span key={name} className="text-muted-foreground">
               <span>{labelFor(name, declared)}</span>
-              <span className="text-foreground ml-1 font-mono">{value === '' ? '(blank)' : value}</span>
+              <span className="text-foreground ml-1 font-mono">
+                {(parameterDisplayValues?.[name] ?? value) === '' ? '(blank)' : (parameterDisplayValues?.[name] ?? value)}
+              </span>
             </span>
           ))}
         </div>

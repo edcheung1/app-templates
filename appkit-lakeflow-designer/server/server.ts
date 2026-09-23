@@ -1,13 +1,13 @@
 import { createApp, createWorkspaceClient, server } from '@databricks/appkit';
 import { exportedModelToRunPayload, findNotebookModelValue } from './exportedRunOutput';
 import type { Request } from 'express';
-import { parseUploads, UPLOAD_REFERENCE, type AppUploads } from '../shared/uploadConfig';
+import { Readable } from 'node:stream';
+import { MAX_UPLOAD_SIZE_LABEL, parseUploads, UPLOAD_REFERENCE, type AppUploads } from '../shared/uploadConfig';
 import {
   APP_VIEWER_PARAM,
   UploadError,
   canAccessRun,
-  readUploadBytes,
-  saveUpload,
+  saveUploadStream,
   viewerKey,
 } from './fileUploads';
 import { appKitUploadStore } from './uploadStore';
@@ -85,6 +85,7 @@ type RunSummary = {
   resultState?: string;
   lifeCycleState?: string;
   parameters?: Record<string, string>;
+  parameterDisplayValues?: Record<string, string>;
 };
 
 const JOB_ID = (() => {
@@ -650,12 +651,15 @@ function summarizeLastRun(run: Record<string, unknown>): RunSummary | undefined 
   return summary;
 }
 
-function lastRunParameters(run: Record<string, unknown>): Record<string, string> | undefined {
+function lastRunParameterData(
+  run: Record<string, unknown>,
+): Pick<RunSummary, 'parameters' | 'parameterDisplayValues'> | undefined {
   const overriding = run.overriding_parameters;
   if (!isRecord(overriding) || !isRecord(overriding.notebook_params)) {
     return undefined;
   }
   const params: Record<string, string> = {};
+  const displayValues: Record<string, string> = {};
   for (const [name, value] of Object.entries(overriding.notebook_params)) {
     if (
       name === TARGET_NODE_PARAM ||
@@ -668,13 +672,23 @@ function lastRunParameters(run: Record<string, unknown>): Record<string, string>
     }
     const isFile = cachedManifest?.parameters.some((parameter) => parameter.name === name && parameter.type === 'file');
     if (isFile) {
-      const reference = `upload:${value.split('/').at(-2)}`;
-      params[name] = UPLOAD_REFERENCE.test(reference) ? reference : '';
+      const parts = value.split('/');
+      const reference = `upload:${parts.at(-2)}`;
+      if (UPLOAD_REFERENCE.test(reference)) {
+        params[name] = reference;
+        const filename = parts.at(-1);
+        if (filename) displayValues[name] = filename;
+      } else {
+        params[name] = '';
+      }
     } else {
       params[name] = value;
     }
   }
-  return params;
+  return {
+    parameters: params,
+    ...(Object.keys(displayValues).length === 0 ? {} : { parameterDisplayValues: displayValues }),
+  };
 }
 
 // Guard every client- or list-supplied run ID before reading output or cancelling it.
@@ -706,8 +720,8 @@ function summarizeHistoryRun(run: Record<string, unknown>) {
   if (resultState !== undefined) summary.resultState = resultState;
   const lifeCycleState = lifeCycleStateOf(run);
   if (lifeCycleState !== undefined) summary.lifeCycleState = lifeCycleState;
-  const parameters = lastRunParameters(run);
-  if (parameters !== undefined) summary.parameters = parameters;
+  const parameterData = lastRunParameterData(run);
+  if (parameterData !== undefined) Object.assign(summary, parameterData);
   return summary;
 }
 
@@ -773,9 +787,12 @@ await createApp({
           if (req.get('content-type') !== 'application/octet-stream')
             throw new UploadError(415, 'Upload the file as an octet stream.');
           if (activeUploads >= 4) throw new UploadError(429, 'Uploads are busy. Try again shortly.');
-          const declaredSize = Number(req.get('content-length'));
-          if (declaredSize > manifest.uploads.maxFileSizeBytes)
-            throw new UploadError(413, 'The file exceeds the 25 MB upload limit.');
+          const contentLength = req.get('content-length');
+          if (contentLength !== undefined && !/^\d+$/.test(contentLength))
+            throw new UploadError(400, 'The Content-Length header is invalid.');
+          const declaredSize = contentLength === undefined ? undefined : Number(contentLength);
+          if (declaredSize !== undefined && declaredSize > manifest.uploads.maxFileSizeBytes)
+            throw new UploadError(413, `The file exceeds the ${MAX_UPLOAD_SIZE_LABEL} upload limit.`);
           let filename: string;
           try {
             filename = decodeURIComponent(req.get('x-file-name') ?? '');
@@ -784,10 +801,19 @@ await createApp({
           }
           activeUploads += 1;
           admitted = true;
-          const bytes = await readUploadBytes(req, manifest.uploads.maxFileSizeBytes);
           res
             .status(201)
-            .json({ upload: await saveUpload(store, manifest.uploads, viewer, parameter.name, filename, bytes) });
+            .json({
+              upload: await saveUploadStream(
+                store,
+                manifest.uploads,
+                viewer,
+                parameter.name,
+                filename,
+                Readable.toWeb(req) as ReadableStream<Uint8Array>,
+                declaredSize,
+              ),
+            });
         } catch (error) {
           req.resume();
           res
@@ -882,10 +908,10 @@ await createApp({
           const activeRun = selectActiveRun(activeRuns);
           const activeSummary = activeRun === undefined ? undefined : summarizeLastRun(activeRun);
           if (activeRun !== undefined && activeSummary !== undefined) {
-            const activeParameters = lastRunParameters(activeRun);
+            const activeParameterData = lastRunParameterData(activeRun);
             active = {
               run: activeSummary,
-              ...(activeParameters === undefined ? {} : { parameters: activeParameters }),
+              ...activeParameterData,
 
               ...(lifeCycleStateOf(activeRun) === undefined ? {} : { lifeCycleState: lifeCycleStateOf(activeRun) }),
             };
@@ -901,12 +927,12 @@ await createApp({
           return;
         }
 
-        const parameters = lastRunParameters(run);
+        const parameterData = lastRunParameterData(run);
 
         const found = {
           status: 'found',
           run: summary,
-          ...(parameters === undefined ? {} : { parameters }),
+          ...parameterData,
           ...(active === undefined ? {} : { active }),
         };
 

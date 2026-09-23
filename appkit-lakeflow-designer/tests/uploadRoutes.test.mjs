@@ -65,7 +65,7 @@ const manifest = {
   uploads: {
     volume: 'main.default.uploads',
     path: '/Volumes/main/default/uploads/designer_uploads/app1',
-    maxFileSizeBytes: 25 * 1024 * 1024,
+    maxFileSizeBytes: 5 * 1024 * 1024 * 1024,
   },
   parameters: [{ name: 'path', label: 'CSV', type: 'file', defaultValue: '/private/author.csv' }],
   blocks: [{ type: 'output', id: 'data', label: 'Data', nodeId: 'source', port: 'data' }],
@@ -83,7 +83,12 @@ async function serverHarness() {
       upload: async (path, bytes, options) => {
         assert.equal(options.overwrite, false);
         assert.equal(stored.has(path), false);
-        stored.set(path, Buffer.from(bytes));
+        stored.set(
+          path,
+          bytes instanceof ReadableStream
+            ? Buffer.from(await new Response(bytes).arrayBuffer())
+            : Buffer.from(bytes),
+        );
       },
       read: async (path, options) => {
         assert.equal(options.maxSize, 16 * 1024);
@@ -207,11 +212,13 @@ for (const filename of ['sales.csv', 'sales.xlsx', 'data.json', 'data.csv.gz']) 
       ['10'],
     );
     assert.deepEqual(history.body.runs[0].parameters, { path: 'upload:829dcaa7-e505-49c1-b6d0-73d1841e990a' });
+    assert.deepEqual(history.body.runs[0].parameterDisplayValues, { path: filename });
     const last = await request('get', '/api/designer/last-run');
     assert.equal(last.body.status, 'found');
     assert.equal(last.body.run.jobRunId, '10');
     assert.equal(last.body.run.taskRunId, '1010');
     assert.deepEqual(last.body.parameters, { path: 'upload:829dcaa7-e505-49c1-b6d0-73d1841e990a' });
+    assert.deepEqual(last.body.parameterDisplayValues, { path: filename });
     assert.deepEqual(state.outputReads, [1010]);
   });
 }
@@ -268,7 +275,10 @@ test('requires ingress identity and uploaded references, and fails closed on inv
   assert.equal(missingIdentity.status, 401);
   const oversized = await request('post', '/api/designer/uploads/:parameterName', {
     params: { parameterName: 'path' },
-    headers: { 'content-type': 'application/octet-stream', 'content-length': String(26 * 1024 * 1024) },
+    headers: {
+      'content-type': 'application/octet-stream',
+      'content-length': String(5 * 1024 * 1024 * 1024 + 1),
+    },
   });
   assert.equal(oversized.status, 413);
   for (const params of [{}, { path: '/private/author.csv' }]) {

@@ -1,4 +1,4 @@
-import { MAX_UPLOAD_BYTES, UPLOAD_REFERENCE } from '../../shared/uploadConfig';
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_SIZE_LABEL, UPLOAD_REFERENCE } from '../../shared/uploadConfig';
 import { uploadsRoute } from './routes';
 
 interface UploadChoice {
@@ -30,7 +30,9 @@ async function readResponse(response: Response): Promise<Record<string, unknown>
 }
 
 export function validateUpload(file: File): string | undefined {
-  return file.size === 0 || file.size > MAX_UPLOAD_BYTES ? 'Choose a non-empty file up to 25 MB.' : undefined;
+  return file.size === 0 || file.size > MAX_UPLOAD_BYTES
+    ? `Choose a non-empty file up to ${MAX_UPLOAD_SIZE_LABEL}.`
+    : undefined;
 }
 
 export async function uploadFile(parameterName: string, file: File): Promise<string> {

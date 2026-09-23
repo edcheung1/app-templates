@@ -64,6 +64,7 @@ export function appKitUploadStore(config: AppUploads | undefined): UploadStore {
   return {
     mkdir: (path) => access((volume) => volume.createDirectory(pluginPath(path))),
     put: (path, bytes) => access((volume) => volume.upload(pluginPath(path), Buffer.from(bytes), { overwrite: false })),
+    putStream: (path, stream) => access((volume) => volume.upload(pluginPath(path), stream, { overwrite: false })),
     read: (path) =>
       access(async (volume) => {
         const contents = await volume.read(pluginPath(path), { maxSize: 16 * 1024 });

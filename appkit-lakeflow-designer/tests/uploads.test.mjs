@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
 import { after, before, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'tsdown';
@@ -34,7 +33,7 @@ after(async () => {
 const storage = {
   volume: 'main.default.uploads',
   path: '/Volumes/main/default/uploads/designer_uploads/app1',
-  maxFileSizeBytes: 25 * 1024 * 1024,
+  maxFileSizeBytes: 5 * 1024 * 1024 * 1024,
 };
 const fileParameter = { name: 'path', type: 'file', label: 'Data', defaultValue: '/Volumes/private/author.csv' };
 const manifest = {
@@ -54,6 +53,10 @@ function memoryStore() {
     put: async (path, bytes) => {
       assert.equal(files.has(path), false);
       files.set(path, Buffer.from(bytes));
+    },
+    putStream: async (path, stream) => {
+      assert.equal(files.has(path), false);
+      files.set(path, Buffer.from(await new Response(stream).arrayBuffer()));
     },
     read: async (path) => {
       if (!files.has(path)) throw new uploads.UploadError(404, 'missing');
@@ -152,32 +155,68 @@ test('never makes incomplete or changed uploads available', async () => {
   await assert.rejects(uploads.resolveUpload(store, storage, owner, 'path', saved.reference), /has changed/);
 });
 
-test('enforces actual streamed byte limits, empty files, interrupted streams and safe filenames', async () => {
-  assert.equal(
-    (await uploads.readUploadBytes(Readable.from([Buffer.from('ab'), Buffer.from('cd')]), 4)).toString(),
-    'abcd',
+test('streams uploads while enforcing actual byte limits, empty files and interrupted requests', async () => {
+  const store = memoryStore();
+  const stream = (...chunks) =>
+    new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(Buffer.from(chunk));
+        controller.close();
+      },
+    });
+  const saved = await uploads.saveUploadStream(
+    store,
+    { ...storage, maxFileSizeBytes: 4 },
+    'viewer',
+    'path',
+    'data.csv',
+    stream('ab', 'cd'),
+    4,
   );
-  await assert.rejects(uploads.readUploadBytes(Readable.from([Buffer.from('ab'), Buffer.from('cde')]), 4), /at most/);
-  await assert.rejects(uploads.readUploadBytes(Readable.from([]), 4), /non-empty/);
+  assert.equal((await uploads.resolveUpload(store, { ...storage, maxFileSizeBytes: 4 }, 'viewer', 'path', saved.reference)).upload.size, 4);
+
   await assert.rejects(
-    uploads.readUploadBytes(
-      Readable.from(
-        (async function* () {
-          yield Buffer.from('a');
-          throw new Error('disconnected');
-        })(),
-      ),
-      4,
+    uploads.saveUploadStream(
+      store,
+      { ...storage, maxFileSizeBytes: 4 },
+      'viewer',
+      'path',
+      'large.csv',
+      stream('ab', 'cde'),
+    ),
+    /5 GB/,
+  );
+  await assert.rejects(
+    uploads.saveUploadStream(store, storage, 'viewer', 'path', 'empty.csv', stream()),
+    /non-empty/,
+  );
+  await assert.rejects(
+    uploads.saveUploadStream(
+      store,
+      storage,
+      'viewer',
+      'path',
+      'interrupted.csv',
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from('a'));
+          controller.error(new Error('disconnected'));
+        },
+      }),
     ),
     /disconnected/,
   );
+  assert.equal([...store.files.keys()].filter((path) => /large|empty|interrupted/.test(path)).length, 0);
+});
+
+test('rejects unsafe filenames and declared sizes', async () => {
   const store = memoryStore();
   for (const filename of ['', ' ', '.', '..', '../data.csv', 'a\\b.csv', 'a\n.csv', 'é'.repeat(128)]) {
     await assert.rejects(uploads.saveUpload(store, storage, 'viewer', 'path', filename, Buffer.from('a')), /valid filename/);
   }
   await assert.rejects(
     uploads.saveUpload(store, { ...storage, maxFileSizeBytes: 1 }, 'viewer', 'path', 'data.csv', Buffer.from('aa')),
-    /limit/,
+    /at most/,
   );
   assert.equal(store.files.size, 0);
 });
@@ -236,7 +275,7 @@ test('validates versioned storage and never initializes a file input with the au
     { ...storage, volume: 'a.b' },
     { ...storage, path: '/Volumes/other/default/uploads/designer_uploads/app1' },
     { ...storage, path: storage.path + '/../escape' },
-    { ...storage, maxFileSizeBytes: 100 * 1024 * 1024 },
+    { ...storage, maxFileSizeBytes: 5 * 1024 * 1024 * 1024 + 1 },
   ]) {
     assert.equal(config.parseUploads(invalid), undefined);
   }

@@ -16,6 +16,7 @@ export type RunHistoryEntry = {
   lifeCycleState?: string;
 
   parameters?: Record<string, string>;
+  parameterDisplayValues?: Record<string, string>;
 };
 
 export type RunHistoryState =
@@ -133,6 +134,7 @@ function parseEntry(raw: unknown): RunHistoryEntry | undefined {
     return undefined;
   }
   const parameters = parseParameters(raw.parameters);
+  const parameterDisplayValues = parseParameters(raw.parameterDisplayValues);
   return {
     jobRunId,
     ...(positiveInt(raw.endTime) === undefined ? {} : { endTime: positiveInt(raw.endTime) }),
@@ -145,6 +147,7 @@ function parseEntry(raw: unknown): RunHistoryEntry | undefined {
     ...(nonEmptyString(raw.resultState) === undefined ? {} : { resultState: nonEmptyString(raw.resultState) }),
     ...(nonEmptyString(raw.lifeCycleState) === undefined ? {} : { lifeCycleState: nonEmptyString(raw.lifeCycleState) }),
     ...(parameters === undefined ? {} : { parameters }),
+    ...(parameterDisplayValues === undefined ? {} : { parameterDisplayValues }),
   };
 }
 

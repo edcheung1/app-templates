@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { Readable } from 'node:stream';
-import { UPLOAD_REFERENCE } from '../shared/uploadConfig';
+import { MAX_UPLOAD_SIZE_LABEL, UPLOAD_REFERENCE } from '../shared/uploadConfig';
 import type { AppUploads } from '../shared/uploadConfig';
 
 export const APP_VIEWER_PARAM = '_lb_app_viewer';
@@ -44,6 +43,7 @@ export interface StoredUpload {
 export interface UploadStore {
   mkdir(path: string): Promise<void>;
   put(path: string, bytes: Uint8Array): Promise<void>;
+  putStream(path: string, stream: ReadableStream<Uint8Array>): Promise<void>;
   read(path: string): Promise<unknown>;
   size(path: string): Promise<number | undefined>;
   delete(path: string): Promise<void>;
@@ -103,22 +103,57 @@ export async function resolveUpload(
   return { path, upload };
 }
 
-// Buffer only a bounded file, with a process-wide admission limit, before writing immutable bytes to UC.
-export async function readUploadBytes(stream: Readable, maxBytes: number): Promise<Buffer> {
-  const chunks: Buffer[] = [];
+export async function saveUploadStream(
+  store: UploadStore,
+  config: AppUploads,
+  viewer: string,
+  parameterName: string,
+  filename: string,
+  stream: ReadableStream<Uint8Array>,
+  declaredSize?: number,
+): Promise<StoredUpload> {
+  if (!isValidFilename(filename)) throw new UploadError(400, 'Choose a file with a valid filename.');
+  if (declaredSize !== undefined && declaredSize > config.maxFileSizeBytes)
+    throw new UploadError(413, `Files must be at most ${MAX_UPLOAD_SIZE_LABEL}.`);
+  const folder = uploadFolder(config, viewer, parameterName);
+  const id = randomUUID();
+  // Isolate each upload so its original extension survives and JSON data cannot collide with its sidecar.
+  const path = `${folder}/${id}/${filename}`;
+  await store.mkdir(`${folder}/${id}`);
   let size = 0;
-  for await (const value of stream.iterator({ destroyOnReturn: false })) {
-    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-    size += chunk.length;
-    if (size > maxBytes)
-      throw new UploadError(413, `Files must be at most ${Math.floor(maxBytes / 1024 / 1024)} MB.`);
-    chunks.push(chunk);
+  let validationError: UploadError | undefined;
+  const boundedStream = stream.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        size += chunk.byteLength;
+        if (size > config.maxFileSizeBytes) {
+          validationError = new UploadError(413, `Files must be at most ${MAX_UPLOAD_SIZE_LABEL}.`);
+          throw validationError;
+        }
+        if (declaredSize !== undefined && size > declaredSize) {
+          validationError = new UploadError(400, 'The upload exceeded its declared size.');
+          throw validationError;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  try {
+    await store.putStream(path, boundedStream);
+    if (size === 0) throw new UploadError(400, 'Choose a non-empty file.');
+    if (declaredSize !== undefined && size !== declaredSize)
+      throw new UploadError(400, 'The upload did not match its declared size.');
+    const upload: StoredUpload = { reference: `upload:${id}`, filename, size, createdAt: Date.now() };
+    // The sidecar is the completion marker; partially written files can never be selected for a run.
+    await store.put(`${folder}/${id}.json`, Buffer.from(JSON.stringify(upload)));
+    return upload;
+  } catch (error) {
+    await store.delete(path).catch(() => undefined);
+    throw validationError ?? error;
   }
-  if (size === 0) throw new UploadError(400, 'Choose a non-empty file.');
-  return Buffer.concat(chunks, size);
 }
 
-export async function saveUpload(
+export function saveUpload(
   store: UploadStore,
   config: AppUploads,
   viewer: string,
@@ -126,22 +161,18 @@ export async function saveUpload(
   filename: string,
   bytes: Uint8Array,
 ): Promise<StoredUpload> {
-  if (!isValidFilename(filename)) throw new UploadError(400, 'Choose a file with a valid filename.');
-  if (bytes.byteLength === 0 || bytes.byteLength > config.maxFileSizeBytes)
-    throw new UploadError(413, 'The file is empty or exceeds the upload limit.');
-  const folder = uploadFolder(config, viewer, parameterName);
-  const id = randomUUID();
-  const upload: StoredUpload = { reference: `upload:${id}`, filename, size: bytes.byteLength, createdAt: Date.now() };
-  // Isolate each upload so its original extension survives and JSON data cannot collide with its sidecar.
-  const path = `${folder}/${id}/${filename}`;
-  await store.mkdir(`${folder}/${id}`);
-  await store.put(path, bytes);
-  try {
-    // The sidecar is the completion marker; partially written files can never be selected for a run.
-    await store.put(`${folder}/${id}.json`, Buffer.from(JSON.stringify(upload)));
-  } catch (error) {
-    await store.delete(path).catch(() => undefined);
-    throw error;
-  }
-  return upload;
+  return saveUploadStream(
+    store,
+    config,
+    viewer,
+    parameterName,
+    filename,
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    }),
+    bytes.byteLength,
+  );
 }

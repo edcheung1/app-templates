@@ -113,8 +113,8 @@ The plugin is initialized lazily from the manifest in a backend-only AppKit inst
 Its generic file-browser routes are never mounted; the Designer routes enforce viewer/parameter ownership.
 Upload, bounded sidecar reads, metadata, directory creation, and deletion all use the plugin API.
 
-Viewers stage files up to 25 MiB in the browser. Clicking Run uploads the staged files before
-starting the job. Bytes are capped while reading, and the
+Viewers stage files up to 5 GiB in the browser. Clicking Run streams the staged files through the app
+server to the configured Unity Catalog volume before starting the job. Bytes are capped while reading, and the
 server limits concurrent upload requests to four. A completed upload gets an immutable generated
 directory preserving the original filename and a persisted sidecar; only completed uploads can become
 job input. The browser holds an opaque upload reference, not an arbitrary volume path. Uploads are

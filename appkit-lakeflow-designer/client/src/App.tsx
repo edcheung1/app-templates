@@ -407,7 +407,9 @@ export function App() {
   const ownFinishedAt = state.startedAt === undefined ? undefined : state.startedAt + state.elapsedMs;
   const followedRunSucceeded = followed.settled && isSuccessfulResultState(followed.snapshot?.resultState);
   const lastSuccessfulEntry =
-    lastRun.status === 'found' ? runHistoryEntry(lastRun.run, lastRun.parameters) : undefined;
+    lastRun.status === 'found'
+      ? runHistoryEntry(lastRun.run, lastRun.parameters, lastRun.parameterDisplayValues)
+      : undefined;
   const defaultDisplayedRun =
     state.phase === 'settled'
       ? ownRunSucceeded && state.snapshot !== undefined
@@ -419,6 +421,7 @@ export function App() {
           ? runHistoryEntry(
               followed.active.run,
               followed.active.parameters,
+              followed.active.parameterDisplayValues,
               followed.snapshot?.resultState,
               followed.snapshot?.lifeCycleState,
             )
@@ -626,12 +629,14 @@ function outputsFrom(result: RunOutcome | undefined): MatchedOutput[] {
 function runHistoryEntry(
   run: LastRunSummary,
   parameters?: Record<string, string>,
+  parameterDisplayValues?: Record<string, string>,
   resultState?: string,
   lifeCycleState?: string,
 ): RunHistoryEntry {
   return {
     ...run,
     ...(parameters === undefined ? {} : { parameters }),
+    ...(parameterDisplayValues === undefined ? {} : { parameterDisplayValues }),
     ...(resultState === undefined ? {} : { resultState }),
     ...(lifeCycleState === undefined ? {} : { lifeCycleState }),
   };
@@ -693,6 +698,7 @@ function LandingBlock({
       <RunResult
         run={followedActive.run}
         parameters={followedActive.parameters}
+        parameterDisplayValues={followedActive.parameterDisplayValues}
         result={followedOutcome}
         declared={declared}
         variant="justFinished"
@@ -733,6 +739,7 @@ function LandingBlock({
       <RunResult
         run={lastRun.run}
         parameters={lastRun.parameters}
+        parameterDisplayValues={lastRun.parameterDisplayValues}
         result={lastRun.result}
         declared={declared}
         variant={section.superseded ? 'superseded' : 'last'}
@@ -792,6 +799,7 @@ function SelectedRunSection({
         ...(selectedEntry.runPageUrl === undefined ? {} : { runPageUrl: selectedEntry.runPageUrl }),
       }}
       parameters={selectedEntry.parameters}
+      parameterDisplayValues={selectedEntry.parameterDisplayValues}
       result={selectedRun.outcome}
       declared={declared}
       variant="historical"
@@ -802,6 +810,7 @@ function SelectedRunSection({
 function RunResult({
   run,
   parameters,
+  parameterDisplayValues,
   result,
   declared,
   variant,
@@ -810,6 +819,7 @@ function RunResult({
 }: {
   run: LastRunSummary;
   parameters?: Record<string, string>;
+  parameterDisplayValues?: Record<string, string>;
   result: RunOutcome;
   declared: AppParameter[];
   variant: LastRunVariant;
@@ -821,6 +831,7 @@ function RunResult({
       <LastRunLabel
         run={run}
         parameters={parameters}
+        parameterDisplayValues={parameterDisplayValues}
         declared={declared}
         variant={variant}
         finishedAt={finishedAt}

@@ -17,6 +17,7 @@ export type LastRunSummary = {
 export type ActiveRun = {
   run: LastRunSummary;
   parameters?: Record<string, string>;
+  parameterDisplayValues?: Record<string, string>;
   lifeCycleState?: string;
 };
 
@@ -33,6 +34,7 @@ export type LastRunState =
       run: LastRunSummary;
 
       parameters?: Record<string, string>;
+      parameterDisplayValues?: Record<string, string>;
       result: RunOutcome;
       active?: ActiveRun;
     };
@@ -98,9 +100,11 @@ function parseActive(raw: unknown): ActiveRun | undefined {
     return undefined;
   }
   const parameters = parseParameters(raw.parameters);
+  const parameterDisplayValues = parseParameters(raw.parameterDisplayValues);
   return {
     run,
     ...(parameters === undefined ? {} : { parameters }),
+    ...(parameterDisplayValues === undefined ? {} : { parameterDisplayValues }),
     ...(typeof raw.lifeCycleState === 'string' && raw.lifeCycleState !== ''
       ? { lifeCycleState: raw.lifeCycleState }
       : {}),
@@ -137,6 +141,9 @@ export async function fetchLastRun(): Promise<LastRunState> {
       status: 'found',
       run,
       ...(parseParameters(body.parameters) === undefined ? {} : { parameters: parseParameters(body.parameters) }),
+      ...(parseParameters(body.parameterDisplayValues) === undefined
+        ? {}
+        : { parameterDisplayValues: parseParameters(body.parameterDisplayValues) }),
       result,
       ...(active === undefined ? {} : { active }),
     };
