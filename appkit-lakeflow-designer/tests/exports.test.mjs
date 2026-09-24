@@ -160,6 +160,29 @@ test('replays recorded parameters idempotently and separates export runs from pr
   assert.equal((await (await h.call(`/${first.exportId}`)).json()).phase, 'running');
 });
 
+test('includes the export job link while queued, running and after failure', async (t) => {
+  const h = await harness(t);
+  const { exportId } = await (await h.start()).json();
+  const run = h.runs.get(2);
+  run.run_page_url = 'https://workspace.databricks.com/jobs/10/runs/2';
+  for (const [state, phase] of [
+    [{ life_cycle_state: 'PENDING' }, 'queued'],
+    [{ life_cycle_state: 'RUNNING' }, 'running'],
+    [{ life_cycle_state: 'TERMINATED', result_state: 'FAILED', state_message: 'Reader failed' }, 'failed'],
+    [{ life_cycle_state: 'TERMINATED', result_state: 'CANCELED' }, 'cancelled'],
+    [{ life_cycle_state: 'TERMINATED', result_state: 'SUCCESS' }, 'failed'],
+  ]) {
+    run.state = state;
+    const status = await (await h.call(`/${exportId}`)).json();
+    assert.equal(status.phase, phase);
+    assert.equal(status.runPageUrl, run.run_page_url);
+  }
+  for (const url of [undefined, '', 'javascript:alert(1)']) {
+    run.run_page_url = url;
+    assert.equal((await (await h.call(`/${exportId}`)).json()).runPageUrl, undefined);
+  }
+});
+
 test('passes only the selected output plan from the publication, ignoring browser overrides', async (t) => {
   const h = await harness(t);
   h.state.manifest.blocks.push({

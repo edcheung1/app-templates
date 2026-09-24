@@ -153,12 +153,15 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
   const status = async (ctx: Awaited<ReturnType<typeof existing>>): Promise<ExportStatus> => {
     if (await ctx.store.read(`${ctx.root}/consumed.json`)) return { exportId: ctx.id, phase: 'consumed' };
     const { run } = await exportRun(ctx);
+    const runPageUrl =
+      typeof run.run_page_url === 'string' && run.run_page_url.startsWith('https://') ? run.run_page_url : undefined;
+    const identity = { exportId: ctx.id, ...(runPageUrl ? { runPageUrl } : {}) };
     const state = stateOf(run);
     if (!terminal.has(String(state.life_cycle_state)))
-      return { exportId: ctx.id, phase: state.life_cycle_state === 'RUNNING' ? 'running' : 'queued' };
+      return { ...identity, phase: state.life_cycle_state === 'RUNNING' ? 'running' : 'queued' };
     if (state.result_state !== 'SUCCESS')
       return {
-        exportId: ctx.id,
+        ...identity,
         phase: state.result_state === 'CANCELED' ? 'cancelled' : 'failed',
         message:
           typeof state.state_message === 'string'
@@ -180,11 +183,11 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
       (await ctx.store.size(`${ctx.root}/result.${format}`)) !== complete.size
     )
       return {
-        exportId: ctx.id,
+        ...identity,
         phase: 'failed',
         message: 'The export artifact is missing or incomplete. Generate it again.',
       };
-    return { exportId: ctx.id, phase: 'ready', format, rowCount: complete.rowCount, size: complete.size };
+    return { ...identity, phase: 'ready', format, rowCount: complete.rowCount, size: complete.size };
   };
   const handleError = (res: Response, error: unknown) => {
     if (!(error instanceof ExportError)) deps.report(error);

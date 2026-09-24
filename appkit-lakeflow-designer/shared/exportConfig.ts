@@ -7,6 +7,7 @@ export type ExportPhase = 'queued' | 'running' | 'ready' | 'failed' | 'cancelled
 export interface ExportStatus {
   exportId: string;
   phase: ExportPhase;
+  runPageUrl?: string;
   message?: string;
   format?: ExportFormat;
   rowCount?: number;

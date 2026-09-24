@@ -372,6 +372,31 @@ test('enables plugin storage on republish and binds a completed upload to a run'
   assert.equal(state.apps.length, 2);
 });
 
+test('enforces published file formats at upload and run boundaries', async () => {
+  const { state, request } = await serverHarness();
+  state.manifest = { ...manifest, parameters: [{ ...manifest.parameters[0], fileFormats: ['excel'] }] };
+  const configuration = await request('get', '/api/designer/config');
+  assert.deepEqual(configuration.body.manifest.parameters[0].fileFormats, ['excel']);
+  const upload = (filename) => request('post', '/api/designer/uploads/:parameterName', {
+    params: { parameterName: 'path' },
+    headers: { 'content-type': 'application/octet-stream', 'x-file-name': filename },
+    bytes: Buffer.from('file contents'),
+  });
+  const rejected = await upload('data.csv');
+  assert.equal(rejected.status, 400);
+  assert.match(rejected.body.error, /expects Excel/);
+  assert.deepEqual(state.submissions, []);
+  const accepted = await upload('data.XLSX');
+  assert.equal(accepted.status, 201);
+  const params = { path: accepted.body.upload.reference };
+  assert.equal((await request('post', '/api/designer/run', { body: { params } })).status, 200);
+  state.manifest = { ...manifest, parameters: [{ ...manifest.parameters[0], fileFormats: ['csv'] }] };
+  const stale = await request('post', '/api/designer/run', { body: { params } });
+  assert.equal(stale.status, 400);
+  assert.match(stale.body.error, /expects CSV/);
+  assert.equal(state.submissions.length, 1);
+});
+
 test('denies cross-viewer results and cancellation at the server routes', async () => {
   const { state, request } = await serverHarness();
   state.runs = [run(10, 'bob')];

@@ -1,5 +1,6 @@
 import { CONFIG_ROUTE } from './routes';
 import { parseAppStorage, type AppStorage } from '../../shared/storageConfig';
+import { isFileFormats } from '../../shared/fileFormats';
 
 export const APP_MANIFEST_VERSION = 5;
 
@@ -13,6 +14,7 @@ export type AppParameter = {
   type: AppParameterType;
   defaultValue: string;
   choices?: string[];
+  fileFormats?: string[];
   help?: string;
 };
 
@@ -114,7 +116,10 @@ export function parseAppManifest(raw: unknown): AppManifest | undefined {
     (raw.exports !== undefined && typeof raw.exports !== 'boolean') ||
     (raw.exports === true && !storage) ||
     (raw.storage !== undefined && !storage) ||
-    (raw.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !storage)
+    (raw.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !storage) ||
+    raw.parameters.some((entry) =>
+      isRecord(entry) && entry.type === 'file' && entry.fileFormats !== undefined && !isFileFormats(entry.fileFormats)
+    )
   )
     return undefined;
   return {
@@ -203,6 +208,7 @@ function parseParameter(entry: Record<string, unknown>): AppParameter[] {
       type,
       defaultValue: type === 'file' ? '' : typeof entry.defaultValue === 'string' ? entry.defaultValue : '',
       ...(type === 'dropdown' && choices !== undefined ? { choices } : {}),
+      ...(type === 'file' && isFileFormats(entry.fileFormats) ? { fileFormats: entry.fileFormats } : {}),
       ...(typeof entry.help === 'string' && entry.help !== '' ? { help: entry.help } : {}),
     },
   ];

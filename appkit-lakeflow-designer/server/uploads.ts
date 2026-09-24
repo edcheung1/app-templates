@@ -2,9 +2,13 @@ import { Readable } from 'node:stream';
 import type { Application, Request } from 'express';
 import { MAX_UPLOAD_SIZE_LABEL, type AppStorage } from '../shared/storageConfig';
 import { UploadError, saveUploadStream, type UploadStore } from './fileUploads';
+import { validateFileFormat } from '../shared/fileFormats';
 
 export interface UploadDependencies {
-  manifest(): Promise<{ storage?: AppStorage; parameters: { name: string; type: string }[] } | undefined>;
+  manifest(): Promise<{
+    storage?: AppStorage;
+    parameters: { name: string; type: string; fileFormats?: string[] }[];
+  } | undefined>;
   viewer(req: Request): string | undefined;
   store(storage: AppStorage): UploadStore;
 }
@@ -44,6 +48,8 @@ export function registerUploadRoutes(app: Pick<Application, 'post'>, deps: Uploa
       } catch {
         throw new UploadError(400, 'The filename is invalid.');
       }
+      const formatError = validateFileFormat(filename, parameter.fileFormats);
+      if (formatError) throw new UploadError(400, formatError);
       activeUploads += 1;
       admitted = true;
       res.status(201).json({

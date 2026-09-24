@@ -147,6 +147,11 @@ export function ExportDownload({ sourceRunId, outputId }: ExportDownloadProps) {
             {cancelling ? 'Cancelling…' : 'Generating export…'}
           </span>
         )}
+        {status?.runPageUrl && (
+          <a className="text-sm underline" href={status.runPageUrl} target="_blank" rel="noopener noreferrer">
+            View job run
+          </a>
+        )}
         {busy && attempt?.exportId && (
           <Button variant="outline" size="sm" disabled={cancelling} onClick={() => void cancel()}>
             Cancel export

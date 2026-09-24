@@ -5,7 +5,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'tsdown';
 
-let uploads, config, parameters, appConfig, outputDirectory;
+let uploads, config, parameters, appConfig, fileFormats, fileUpload, outputDirectory;
 before(async () => {
   outputDirectory = await mkdtemp(fileURLToPath(new URL('../.upload-tests-', import.meta.url)));
   await build({
@@ -14,6 +14,8 @@ before(async () => {
       storageConfig: 'shared/storageConfig.ts',
       runParameters: 'server/runParameters.ts',
       appConfig: 'client/src/appConfig.ts',
+      fileFormats: 'shared/fileFormats.ts',
+      fileUpload: 'client/src/fileUpload.ts',
     },
     config: false,
     tsconfig: 'tsconfig.server.json',
@@ -25,6 +27,8 @@ before(async () => {
   config = await import(pathToFileURL(join(outputDirectory, 'storageConfig.mjs')).href);
   parameters = await import(pathToFileURL(join(outputDirectory, 'runParameters.mjs')).href);
   appConfig = await import(pathToFileURL(join(outputDirectory, 'appConfig.mjs')).href);
+  fileFormats = await import(pathToFileURL(join(outputDirectory, 'fileFormats.mjs')).href);
+  fileUpload = await import(pathToFileURL(join(outputDirectory, 'fileUpload.mjs')).href);
 });
 after(async () => {
   if (outputDirectory) await rm(outputDirectory, { recursive: true });
@@ -320,4 +324,52 @@ test('ordinary parameters retain defaults and dropdown validation without owners
     params: { choice: 'A' },
   });
   assert.equal((await parameters.resolveRunParameters(regular, { choice: 'C' }, undefined, memoryStore())).ok, false);
+});
+
+test('rejects mismatched uploads before network transfer, including drag-and-drop selections', async () => {
+  const csv = new File(['a,b\n1,2\n'], 'data.csv');
+  assert.match(fileUpload.validateUpload(csv, ['excel']), /expects Excel/);
+  await assert.rejects(fileUpload.uploadFile('path', csv, ['excel']), /expects Excel/);
+  assert.equal(fileUpload.validateUpload(csv, ['csv']), undefined);
+  assert.match(fileUpload.validateUpload(new File([], 'empty.xlsx'), ['excel']), /non-empty/);
+  assert.equal(fileFormats.uploadAccept(['excel']), '.xls,.xlsx');
+});
+
+test('validates supported extensions case-insensitively without inferring formats or trusting MIME types', () => {
+  for (const [format, filename] of [
+    ['excel', 'DATA.XLSX'], ['excel', 'legacy.xls'], ['csv', 'data.tsv'], ['csv', 'data.CSV.GZ'],
+    ['json', 'data.jsonl'], ['json', 'data.ndjson.bz2'], ['parquet', 'part.parquet'],
+    ['avro', 'part.avro'], ['orc', 'part.orc'], ['xml', 'data.xml'], ['pdf', 'data.pdf'],
+  ]) assert.equal(fileFormats.validateFileFormat(filename, [format]), undefined);
+  for (const filename of ['data.csv', 'data.xlsx.csv', 'data', 'data.xlsx.gz'])
+    assert.match(fileFormats.validateFileFormat(filename, ['excel']), /expects Excel/);
+  assert.match(fileFormats.validateFileFormat('data.xlsx', ['csv']), /expects CSV/);
+  assert.match(fileUpload.validateUpload(new File(['a'], 'data.csv', { type: 'application/vnd.ms-excel' }), ['excel']), /expects Excel/);
+  for (const formats of [undefined, [], ['text'], ['binaryfile'], ['custom.provider'], ['constructor']]) {
+    assert.equal(fileFormats.validateFileFormat('no-extension', formats), undefined);
+    assert.equal(fileFormats.uploadAccept(formats), undefined);
+  }
+  assert.match(fileFormats.validateFileFormat('data.csv', ['csv', 'excel']), /expects Excel/);
+  assert.equal(fileFormats.uploadAccept(['csv', 'text']), fileFormats.uploadAccept(['csv']));
+  assert.equal(fileFormats.uploadAccept(['csv', 'excel']), undefined);
+});
+
+test('preserves file format constraints through the browser manifest and rejects malformed metadata', () => {
+  const configured = { ...manifest, parameters: [{ ...fileParameter, fileFormats: ['excel'] }] };
+  assert.deepEqual(appConfig.parseAppManifest(configured).parameters[0].fileFormats, ['excel']);
+  for (const invalid of ['excel', null, [1], [''], ['EXCEL']]) {
+    assert.equal(appConfig.parseAppManifest({ ...manifest, parameters: [{ ...fileParameter, fileFormats: invalid }] }), undefined);
+  }
+});
+
+test('rechecks retained uploads against the current publication before starting a run', async () => {
+  const store = memoryStore();
+  const owner = uploads.viewerKey('alice', '100');
+  const saved = await uploads.saveUpload(store, storage, owner, 'path', 'data.csv', Buffer.from('a\n1\n'));
+  const result = await parameters.resolveRunParameters(
+    { ...manifest, parameters: [{ ...fileParameter, fileFormats: ['excel'] }] },
+    { path: saved.reference }, owner, store,
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /expects Excel/);
 });

@@ -9,6 +9,7 @@ import { isReservedParameter, resolveRunParameters } from './runParameters';
 import { isExportRun, manifestRevision, registerExportRoutes } from './exports';
 import { appKitExportStore } from './exportStore';
 import { APP_REVISION_PARAM, isExecutionPlan } from '../shared/exportConfig';
+import { isFileFormats } from '../shared/fileFormats';
 
 // Each published app's manifest is written by the publish flow beside the runner notebook, in the
 // app's own publisher-owned folder (not a shared, world-writable root), and read at startup via the
@@ -42,6 +43,7 @@ type AppParameter = {
   type: 'text' | 'number' | 'dropdown' | 'file';
   defaultValue: string;
   choices?: string[];
+  fileFormats?: string[];
   help?: string;
 };
 type AppBlock =
@@ -246,7 +248,10 @@ function parseManifest(raw: unknown): AppManifest | undefined {
     (parsed.exports !== undefined && typeof parsed.exports !== 'boolean') ||
     (parsed.exports === true && !storage) ||
     (parsed.storage !== undefined && !storage) ||
-    (parsed.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !storage)
+    (parsed.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !storage) ||
+    parsed.parameters.some((entry) =>
+      isRecord(entry) && entry.type === 'file' && entry.fileFormats !== undefined && !isFileFormats(entry.fileFormats)
+    )
   )
     return undefined;
   const parameters: AppParameter[] = parsed.parameters.filter(isRecord).flatMap((entry): AppParameter[] => {
@@ -278,6 +283,7 @@ function parseManifest(raw: unknown): AppManifest | undefined {
         type,
         defaultValue: type === 'file' ? '' : typeof entry.defaultValue === 'string' ? entry.defaultValue : '',
         ...(type === 'dropdown' && choices !== undefined ? { choices } : {}),
+        ...(type === 'file' && isFileFormats(entry.fileFormats) ? { fileFormats: entry.fileFormats } : {}),
         ...(typeof entry.help === 'string' && entry.help !== '' ? { help: entry.help } : {}),
       },
     ];

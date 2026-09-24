@@ -46,12 +46,12 @@ export function ParameterForm({
     !runnable ||
     fileParameters.some(({ name }) => stagedFiles[name] === undefined || uploadErrors[name] !== undefined);
 
-  const stageFile = (name: string, file: File) => {
+  const stageFile = ({ name, fileFormats }: AppParameter, file: File) => {
     setStagedFiles((current) => ({ ...current, [name]: file }));
     setUploadedFiles((current) => ({ ...current, [name]: undefined }));
     setUploadErrors((current) => ({
       ...current,
-      [name]: validateUpload(file),
+      [name]: validateUpload(file, fileFormats),
     }));
     set(name, '');
   };
@@ -67,12 +67,12 @@ export function ParameterForm({
     const errors: Record<string, string> = {};
 
     await Promise.all(
-      fileParameters.map(async ({ name }) => {
+      fileParameters.map(async ({ name, fileFormats }) => {
         const file = stagedFiles[name];
         if (file === undefined) return;
         const previous = uploadedFiles[name];
         try {
-          const reference = previous?.file === file ? previous.reference : await uploadFile(name, file);
+          const reference = previous?.file === file ? previous.reference : await uploadFile(name, file, fileFormats);
           nextValues[name] = reference;
           completed[name] = { file, reference };
         } catch (error) {
@@ -104,9 +104,10 @@ export function ParameterForm({
             {parameter.type === 'file' ? (
               <FileParameterControl
                 name={parameter.name}
+                fileFormats={parameter.fileFormats}
                 file={stagedFiles[parameter.name]}
                 error={uploadErrors[parameter.name]}
-                onFileChange={(file) => stageFile(parameter.name, file)}
+                onFileChange={(file) => stageFile(parameter, file)}
                 disabled={running || uploading || !runnable}
               />
             ) : (

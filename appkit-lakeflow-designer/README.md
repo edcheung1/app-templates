@@ -137,10 +137,15 @@ Viewers stage files up to 5 GiB in the browser. Clicking Run streams the staged 
 server to the configured Unity Catalog volume before starting the job. Bytes are capped while reading, and the
 server limits concurrent upload requests to four. A completed upload gets an immutable generated
 directory preserving the original filename and a persisted sidecar; only completed uploads can become
-job input. The browser holds an opaque upload reference, not an arbitrary volume path. Uploads are
-format-agnostic: the Source operator's configured
-format, read options (including Excel sheet/range), and expected columns are unchanged. Uploading
-a file does not infer or change that format; schema/parse errors are reported by the normal job run.
+job input. The browser holds an opaque upload reference, not an arbitrary volume path. Publishing
+records each upload parameter's static Source formats in `fileFormats`. The picker filters known
+extensions; browser and server reject mismatched filenames before upload, and run submission rechecks
+retained uploads against the current manifest. A parameter used by multiple Sources must match all
+their static constraints. Text/binary readers, inferred formats, unknown providers and formats
+parameterized at runtime have no filename restriction.
+This is extension validation, not content or schema validation: renamed or malformed files still
+reach the reader. Uploading never changes the Source format, read options (including Excel
+sheet/range), or expected columns. Parse/schema errors are reported by the normal Job run.
 
 The app requires the authenticated `x-forwarded-user` header supplied by Databricks Apps ingress.
 Do not expose this server directly to untrusted traffic that can supply its own identity headers.
@@ -172,6 +177,8 @@ Visualizations do not show download controls or a row-count footer, even when th
 The App verifies run ownership, Job identity, output membership, and the current publication revision,
 then starts an idempotent export run using that source run's recorded parameters. Data is recomputed
 at export time, not retrieved from a historical snapshot. A stale publication requires a new App run.
+Export status includes a **View job run** link once Jobs supplies its run URL, including after failure.
+Opening that link requires the viewer's own workspace/Job permissions; the App does not grant them.
 
 For download-enabled apps, each output block in `designerApp.json` contains `executionNodeIds`:
 the target and its ancestors, computed at publication with Designer's Run up to graph helper.

@@ -1,5 +1,6 @@
 import type { AppStorage } from '../shared/storageConfig';
 import { APP_VIEWER_PARAM, UploadError, resolveUpload, type UploadStore } from './fileUploads';
+import { validateFileFormat } from '../shared/fileFormats';
 
 export function isReservedParameter(name: string): boolean {
   return name === 'target_node' || name === 'ld_display_outputs' || name === 'ld_display_outputs_for' || name.startsWith('_lb_');
@@ -8,7 +9,14 @@ export function isReservedParameter(name: string): boolean {
 interface ParameterManifest {
   storage?: AppStorage;
   blocks?: { type: string; nodeId?: string }[];
-  parameters: { name: string; label: string; type: string; defaultValue: string; choices?: string[] }[];
+  parameters: {
+    name: string;
+    label: string;
+    type: string;
+    defaultValue: string;
+    choices?: string[];
+    fileFormats?: string[];
+  }[];
 }
 
 const DISPLAY_OUTPUTS_FOR_PARAM = 'ld_display_outputs_for';
@@ -41,7 +49,10 @@ export async function resolveRunParameters(
     if (parameter.type === 'file') {
       if (!manifest.storage || !viewer) return { ok: false, error: 'File uploads are not configured.' };
       try {
-        params[parameter.name] = (await resolveUpload(store, manifest.storage, viewer, parameter.name, resolved)).path;
+        const { path, upload } = await resolveUpload(store, manifest.storage, viewer, parameter.name, resolved);
+        const formatError = validateFileFormat(upload.filename, parameter.fileFormats);
+        if (formatError) return { ok: false, error: formatError };
+        params[parameter.name] = path;
       } catch (error) {
         return {
           ok: false,

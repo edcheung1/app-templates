@@ -1,15 +1,19 @@
 import { useRef, useState, type DragEvent } from 'react';
 import { Button, cn, formatFileSize, Input } from '@databricks/appkit-ui/react';
+import { uploadAccept } from '../../shared/fileFormats';
 
 export interface FileParameterControlProps {
   name: string;
+  fileFormats?: string[];
   file: File | undefined;
   error: string | undefined;
   onFileChange: (file: File) => void;
   disabled: boolean;
 }
 
-export function FileParameterControl({ name, file, error, onFileChange, disabled }: FileParameterControlProps) {
+export function FileParameterControl({
+  name, fileFormats, file, error, onFileChange, disabled,
+}: FileParameterControlProps) {
   const input = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const errorId = `${name}-upload-error`;
@@ -56,6 +60,7 @@ export function FileParameterControl({ name, file, error, onFileChange, disabled
           ref={input}
           id={name}
           type="file"
+          accept={uploadAccept(fileFormats)}
           className="sr-only"
           disabled={disabled}
           aria-describedby={error === undefined ? undefined : errorId}
