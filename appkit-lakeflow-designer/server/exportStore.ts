@@ -4,8 +4,8 @@ import { createStorageVolume, encodeStoragePath, parseStorageFileSize } from './
 
 export interface ExportStore {
   create(path: string, value: object): Promise<boolean>;
+  write(path: string, value: object): Promise<void>;
   read(path: string): Promise<unknown>;
-  remove(path: string): Promise<void>;
   size(path: string): Promise<number | undefined>;
   download(path: string): Promise<ReadableStream<Uint8Array>>;
 }
@@ -41,19 +41,17 @@ export function appKitExportStore(storage: AppStorage): ExportStore {
         throw error;
       }
     },
+    async write(path, value) {
+      const handle = await volume();
+      await handle.createDirectory(encodeStoragePath(path.slice(0, path.lastIndexOf('/'))));
+      await handle.upload(encodeStoragePath(path), Buffer.from(JSON.stringify(value)), { overwrite: true });
+    },
     async read(path) {
       try {
         return JSON.parse(await (await volume()).read(encodeStoragePath(path), { maxSize: 64 * 1024 }));
       } catch (error) {
         if (hasStatus(error, 404)) return undefined;
         throw error;
-      }
-    },
-    async remove(path) {
-      try {
-        await (await volume()).delete(encodeStoragePath(path));
-      } catch (error) {
-        if (!hasStatus(error, 404)) throw error;
       }
     },
     async size(path) {

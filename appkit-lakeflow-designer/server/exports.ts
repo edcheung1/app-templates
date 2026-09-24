@@ -62,6 +62,7 @@ interface ExportManifest {
 }
 interface ExportRequest {
   exportId: string;
+  cacheKey?: string;
   sourceRunId: number;
   outputId: string;
   viewer: string;
@@ -113,6 +114,7 @@ function validRequest(value: unknown, id: string, viewer: string, root: string):
     !record(value) ||
     value.exportId !== id ||
     value.viewer !== viewer ||
+    (value.cacheKey !== undefined && (typeof value.cacheKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.cacheKey))) ||
     !record(value.instruction) ||
     !record(value.params)
   )
@@ -134,6 +136,18 @@ function validRequest(value: unknown, id: string, viewer: string, root: string):
 }
 
 export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, deps: ExportDependencies) {
+  const pending = new Map<string, Promise<ExportStatus>>();
+  const shareGeneration = async (key: string, generate: () => Promise<ExportStatus>) => {
+    const active = pending.get(key);
+    if (active) return active;
+    const operation = generate();
+    pending.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      pending.delete(key);
+    }
+  };
   const context = async (req: Request) => {
     const viewer = deps.viewer(req);
     if (!viewer) throw new ExportError(401, 'Sign in through Databricks Apps to export data.');
@@ -147,15 +161,14 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
       base: `${manifest.storage.path}/exports/${viewer}`,
     };
   };
-  const existing = async (req: Request) => {
-    const ctx = await context(req);
-    const id = req.params.exportId;
+  const existingAt = async (ctx: Awaited<ReturnType<typeof context>>, id: unknown) => {
     if (typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) throw new ExportError(404, 'Export not found.');
     const root = `${ctx.base}/${id}`;
     const request = await ctx.store.read(`${root}/request.json`);
     if (!validRequest(request, id, ctx.viewer, root)) throw new ExportError(404, 'Export not found.');
     return { ...ctx, request, root, id };
   };
+  const existing = async (req: Request) => existingAt(await context(req), req.params.exportId);
   const exportRun = async (ctx: Awaited<ReturnType<typeof existing>>) => {
     const submitted = await ctx.store.read(`${ctx.root}/submission.json`);
     if (!record(submitted) || typeof submitted.runId !== 'number' || !Number.isSafeInteger(submitted.runId))
@@ -171,7 +184,6 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
     return { run, runId: submitted.runId };
   };
   const status = async (ctx: Awaited<ReturnType<typeof existing>>): Promise<ExportStatus> => {
-    if (await ctx.store.read(`${ctx.root}/consumed.json`)) return { exportId: ctx.id, phase: 'consumed' };
     const { run } = await exportRun(ctx);
     const runPageUrl =
       typeof run.run_page_url === 'string' && run.run_page_url.startsWith('https://') ? run.run_page_url : undefined;
@@ -279,61 +291,99 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
           throw new ExportError(409, 'This run is missing recorded parameters. Run the app again.');
         params[parameter.name] = value;
       }
-      const exportId = digest([ctx.viewer, body.sourceRunId, body.outputId, body.format, body.requestId]);
-      const root = `${ctx.base}/${exportId}`;
-      const instruction = {
-        id: exportId,
-        root,
-        nodeId: block.nodeId,
-        port: block.port,
-        format: body.format,
-        notebookPath,
-        executionNodeIds: block.executionNodeIds,
-      };
-      const request: ExportRequest = {
-        exportId,
-        sourceRunId: Number(body.sourceRunId),
-        outputId: body.outputId,
-        viewer: ctx.viewer,
-        revision,
-        params,
-        instruction,
-      };
-      if (Buffer.byteLength(JSON.stringify(request)) > 48 * 1024)
-        throw new ExportError(400, 'The recorded run parameters are too large to export.');
-      const notebookParams = {
-        ...params,
-        [APP_VIEWER_PARAM]: ctx.viewer,
-        [APP_REVISION_PARAM]: revision,
-        ld_display_outputs: 'false',
-        ld_display_outputs_for: '',
-        _lb_collect_row_counts: 'false',
-        [EXPORT_REQUEST_PARAM]: JSON.stringify(instruction),
-      };
-      // Jobs run-now limits notebook_params to 10,000 serialized bytes.
-      if (Buffer.byteLength(JSON.stringify(notebookParams)) > 10_000)
-        throw new ExportError(400, 'The execution plan and recorded parameters are too large to export.');
-      // A content-addressed path can still be edited by its owner (including Designer
-      // regeneration). Check the actual code before paying for a no-op export run.
+      const recordedParams = Object.fromEntries(
+        Object.entries(params).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+      );
+      // Include the bytes as well as the content-addressed path: its owner can still edit it.
       const notebookSource = await deps.notebookSource(notebookPath);
-      const targetHook = `_lb_app_runtime.on_output(${JSON.stringify(block.nodeId)},`;
+      const cacheKey = digest([
+        'export-cache-v1',
+        deps.jobId,
+        ctx.viewer,
+        body.sourceRunId,
+        body.outputId,
+        body.format,
+        revision,
+        notebookPath,
+        notebookSource,
+        recordedParams,
+      ]);
+      const cachePath = `${ctx.base}/cache/${cacheKey}.json`;
+      const outputId = body.outputId;
+      const format = body.format;
+      const { nodeId, port, executionNodeIds } = block;
+      const prepare = (exportId: string) => {
+        const root = `${ctx.base}/${exportId}`;
+        const instruction = { id: exportId, root, nodeId, port, format, notebookPath, executionNodeIds };
+        const request: ExportRequest = {
+          exportId,
+          cacheKey,
+          sourceRunId: Number(body.sourceRunId),
+          outputId,
+          viewer: ctx.viewer,
+          revision,
+          params: recordedParams,
+          instruction,
+        };
+        if (Buffer.byteLength(JSON.stringify(request)) > 48 * 1024)
+          throw new ExportError(400, 'The recorded run parameters are too large to export.');
+        const notebookParams = {
+          ...recordedParams,
+          [APP_VIEWER_PARAM]: ctx.viewer,
+          [APP_REVISION_PARAM]: revision,
+          ld_display_outputs: 'false',
+          ld_display_outputs_for: '',
+          _lb_collect_row_counts: 'false',
+          [EXPORT_REQUEST_PARAM]: JSON.stringify(instruction),
+        };
+        // Jobs run-now limits notebook_params to 10,000 serialized bytes.
+        if (Buffer.byteLength(JSON.stringify(notebookParams)) > 10_000)
+          throw new ExportError(400, 'The execution plan and recorded parameters are too large to export.');
+        return { root, request, notebookParams };
+      };
+      const first = prepare(cacheKey);
+      const targetHook = `_lb_app_runtime.on_output(${JSON.stringify(nodeId)},`;
       if (
         !notebookSource?.split('\n').some((line) => line.trimStart().startsWith(targetHook)) ||
-        !block.executionNodeIds.every((node) => notebookSource.includes(`.should_run(${JSON.stringify(node)})`))
+        !executionNodeIds.every((node) => notebookSource.includes(`.should_run(${JSON.stringify(node)})`))
       )
         throw new ExportError(
           409,
           'The runner notebook has outdated or modified export code. Republish the app, run it again, then retry the export.',
         );
-      await ctx.store.create(`${root}/request.json`, request);
-      const saved = await ctx.store.read(`${root}/request.json`);
-      if (!validRequest(saved, exportId, ctx.viewer, root) || JSON.stringify(saved) !== JSON.stringify(request))
-        throw new ExportError(409, 'This request changed. Generate a new export.');
-      if (!(await ctx.store.read(`${root}/submission.json`))) {
-        const runId = await deps.start(notebookParams, exportId);
-        await ctx.store.create(`${root}/submission.json`, { runId });
-      }
-      res.status(202).json({ exportId, phase: 'queued' });
+      const result = await shareGeneration(cachePath, async () => {
+        const cached = await ctx.store.read(cachePath);
+        let previousExport = false;
+        if (record(cached) && typeof cached.exportId === 'string' && /^[a-f0-9]{64}$/.test(cached.exportId)) {
+          previousExport = true;
+          try {
+            const saved = await existingAt(ctx, cached.exportId);
+            if (saved.request.cacheKey === cacheKey) {
+              const current = await status(saved);
+              if (['ready', 'queued', 'running'].includes(current.phase)) return current;
+            }
+          } catch (error) {
+            // Missing cache records/runs can be rebuilt; service failures must not start duplicate compute.
+            if (!(error instanceof ExportError) || ![404, 409].includes(error.status)) throw error;
+          }
+        }
+        // Concurrent first requests, including across server instances, share a Jobs idempotency token.
+        // A new request ID allows a failed/cancelled generation or a manually removed file to be replaced.
+        const exportId = previousExport ? digest([cacheKey, body.requestId]) : cacheKey;
+        const { root, request, notebookParams } = previousExport ? prepare(exportId) : first;
+        await ctx.store.create(`${root}/request.json`, request);
+        const saved = await ctx.store.read(`${root}/request.json`);
+        if (!validRequest(saved, exportId, ctx.viewer, root) || JSON.stringify(saved) !== JSON.stringify(request))
+          throw new ExportError(409, 'This request changed. Generate a new export.');
+        if (!(await ctx.store.read(`${root}/submission.json`))) {
+          const runId = await deps.start(notebookParams, exportId);
+          await ctx.store.create(`${root}/submission.json`, { runId });
+        }
+        // Persist pending as well as completed generations, so abandoning the page does not lose reuse.
+        await ctx.store.write(cachePath, { exportId });
+        return { exportId, phase: 'queued' };
+      });
+      res.status(result.phase === 'ready' ? 200 : 202).json(result);
     } catch (error) {
       handleError(res, error);
     }
@@ -355,25 +405,13 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
     }
   });
   app.get('/api/designer/exports/:exportId/download', async (req, res) => {
-    let locked: Awaited<ReturnType<typeof existing>> | undefined;
     try {
       if (req.method !== 'GET') throw new ExportError(405, 'Use GET to download the export.');
       if (req.get('range')) throw new ExportError(416, 'Partial downloads are not supported. Retry the full download.');
       const ctx = await existing(req);
-      if (!(await ctx.store.create(`${ctx.root}/download.lock`, { startedAt: Date.now() })))
-        throw new ExportError(
-          409,
-          'This export is already downloading. If that download was abandoned, generate a new export.',
-        );
-      locked = ctx;
       const current = await status(ctx);
       if (current.phase !== 'ready')
-        throw new ExportError(
-          409,
-          current.phase === 'consumed'
-            ? 'This export was downloaded and removed. Generate it again.'
-            : 'The export is not ready.',
-        );
+        throw new ExportError(409, 'The export is not ready.');
       const path = `${ctx.root}/result.${current.format}`;
       const stream = await ctx.store.download(path);
       res.setHeader(
@@ -408,19 +446,8 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
         }
       }
       await pipeline(Readable.from(bytes()), res);
-      if (res.writableFinished) {
-        // Completion means bytes were handed to the transport, not proof the browser saved them.
-        try {
-          await ctx.store.create(`${ctx.root}/consumed.json`, { consumedAt: Date.now() });
-          await ctx.store.remove(path);
-        } catch (error) {
-          deps.report(error);
-        }
-      }
     } catch (error) {
       handleError(res, error);
-    } finally {
-      if (locked) await locked.store.remove(`${locked.root}/download.lock`).catch(deps.report);
     }
   });
 }

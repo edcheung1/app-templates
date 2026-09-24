@@ -109,11 +109,13 @@ test('tabular outputs retain their row count and enabled download controls', () 
   assert.match(html, />2 rows</);
   assert.match(html, />Generate CSV</);
   assert.match(html, />Generate Excel</);
-  assert.match(html, /Recomputes this output/);
+  assert.match(html, /Reuses generated files/);
+  assert.match(html, /retained in the storage volume/);
+  assert.doesNotMatch(html, /removed when possible|New export/);
 
   const withoutDownloads = outputSection(payload, undefined, false);
   assert.match(withoutDownloads, />2 rows</);
-  assert.doesNotMatch(withoutDownloads, /Generate CSV|Generate Excel|Recomputes this output/);
+  assert.doesNotMatch(withoutDownloads, /Generate CSV|Generate Excel|Reuses generated files/);
 });
 
 test('the initial last-run response enables exports only for a fully successful run', async () => {
@@ -160,7 +162,7 @@ for (const widgetType of ['line', 'pie', 'unsupported']) {
       const html = outputSection(payload, chartSpec);
       assert.match(html, /Published output/);
       assert.doesNotMatch(html, />[\d,]+ rows(?: shown)?</);
-      assert.doesNotMatch(html, /Generate CSV|Generate Excel|Recomputes this output/);
+      assert.doesNotMatch(html, /Generate CSV|Generate Excel|Reuses generated files/);
       if (rowCount === 0) assert.match(html, /No rows returned/);
       else if (widgetType === 'unsupported') assert.match(html, /<table/);
     }
@@ -178,7 +180,7 @@ test('visualizations retain their truncated-data warning without the table foote
   });
   assert.match(html, /This chart is drawn from part of the result/);
   assert.doesNotMatch(html, />2 rows shown</);
-  assert.doesNotMatch(html, /Generate CSV|Generate Excel|Recomputes this output/);
+  assert.doesNotMatch(html, /Generate CSV|Generate Excel|Reuses generated files/);
 });
 
 test('preserves notebook overflow without inventing a full count or a row-limit cause', () => {

@@ -26,7 +26,7 @@ after(async () => {
   if (outputDirectory) await rm(outputDirectory, { recursive: true });
 });
 
-async function harness(t) {
+async function harness(t, persisted) {
   const viewer = 'a'.repeat(64);
   const notebookPath = `/Users/author/app/runner-${'b'.repeat(64)}.designer.py`;
   const manifest = {
@@ -51,10 +51,9 @@ async function harness(t) {
     cancelled: [],
     reports: [],
     streams: undefined,
-    removeError: false,
   };
-  const files = new Map();
-  const runs = new Map([
+  const files = persisted?.files ?? new Map();
+  const runs = persisted?.runs ?? new Map([
     [
       1,
       {
@@ -67,23 +66,15 @@ async function harness(t) {
       },
     ],
   ]);
-  let resolveUnlocked;
-  const unlocked = new Promise((resolve) => {
-    resolveUnlocked = resolve;
-  });
   const store = {
     create: async (path, value) => {
       if (files.has(path)) return false;
       files.set(path, Buffer.from(JSON.stringify(value)));
       return true;
     },
+    write: async (path, value) => { files.set(path, Buffer.from(JSON.stringify(value))); },
     read: async (path) => (files.has(path) ? JSON.parse(files.get(path).toString()) : undefined),
     size: async (path) => files.get(path)?.length,
-    remove: async (path) => {
-      if (state.removeError && path.endsWith('.csv')) throw new Error('Storage unavailable');
-      files.delete(path);
-      if (path.endsWith('download.lock')) resolveUnlocked();
-    },
     download: async (path) =>
       state.streams
         ? state.streams()
@@ -105,12 +96,13 @@ async function harness(t) {
     getRun: async (id) => runs.get(id),
     start: async (params, token) => {
       state.starts.push({ params, token });
-      runs.set(2, {
+      const runId = Math.max(...runs.keys()) + 1;
+      runs.set(runId, {
         job_id: 10,
         state: { life_cycle_state: 'RUNNING' },
         overriding_parameters: { notebook_params: params },
       });
-      return 2;
+      return runId;
     },
     cancel: async (id) => {
       state.cancelled.push(id);
@@ -143,7 +135,7 @@ async function harness(t) {
     await store.create(`${root}/completion.json`, { id: exportId, format: 'csv', size: 10, rowCount: 2 });
     return { exportId, root };
   };
-  return { state, runs, files, store, start, call, ready, unlocked, viewer };
+  return { state, runs, files, store, start, call, ready, viewer };
 }
 
 test('replays recorded parameters idempotently and separates export runs from previews', async (t) => {
@@ -226,7 +218,7 @@ test('keeps repeated exports of every output valid across presentation-only mani
     const response = await h.start({ outputId, requestId });
     assert.equal(response.status, 202, JSON.stringify(await response.json()));
   }
-  assert.equal(h.state.starts.length, 3);
+  assert.equal(h.state.starts.length, 2);
   for (const { params } of h.state.starts) {
     assert.equal(params.value, 'recorded');
     assert.equal(params.hidden, 'original default');
@@ -372,7 +364,7 @@ test('rejects undeclared output, invalid format, and missing identity', async (t
   assert.equal(h.state.starts.length, 0);
 });
 
-test('streams and removes the artifact, then regenerates from the same source run', async (t) => {
+test('retains the artifact for repeated downloads and reuses it across new requests and server restarts', async (t) => {
   const h = await harness(t);
   const { exportId, root } = await h.ready();
   assert.deepEqual(await (await h.call(`/${exportId}`)).json(), {
@@ -386,21 +378,142 @@ test('streams and removes the artifact, then regenerates from the same source ru
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-disposition'), /attachment; filename="result.csv"/);
   assert.equal(await response.text(), 'value\n1\n2\n');
-  await h.unlocked;
-  assert.equal(h.files.has(`${root}/result.csv`), false);
-  assert.equal((await (await h.call(`/${exportId}`)).json()).phase, 'consumed');
-  assert.equal((await h.call(`/${exportId}/download`)).status, 409);
-  const regenerated = await h.start({ requestId: '22222222-2222-4222-8222-222222222222' });
-  assert.equal(regenerated.status, 202);
-  const next = await regenerated.json();
+  assert.equal(h.files.has(`${root}/result.csv`), true);
+  assert.equal(h.files.has(`${root}/consumed.json`), false);
+  assert.equal(h.files.has(`${root}/download.lock`), false);
+  assert.equal((await (await h.call(`/${exportId}`)).json()).phase, 'ready');
+  assert.equal(await (await h.call(`/${exportId}/download`)).text(), 'value\n1\n2\n');
+  for (const active of [h, await harness(t, h)]) {
+    const reused = await active.start({ requestId: '22222222-2222-4222-8222-222222222222' });
+    assert.equal(reused.status, 200);
+    assert.equal((await reused.json()).exportId, exportId);
+    assert.equal(active.state.starts.length, active === h ? 1 : 0);
+  }
+  assert.equal(h.state.starts.length, 1);
+});
+
+test('shares pending generation across concurrent requests and after restarting the server', async (t) => {
+  const h = await harness(t);
+  const responses = await Promise.all([
+    h.start(),
+    h.start({ requestId: '22222222-2222-4222-8222-222222222222' }),
+    h.start({ requestId: '33333333-3333-4333-8333-333333333333' }),
+  ]);
+  const results = await Promise.all(responses.map((response) => response.json()));
+  assert.equal(new Set(results.map(({ exportId }) => exportId)).size, 1);
+  assert.equal(h.state.starts.length, 1);
+  const restarted = await harness(t, h);
+  const response = await restarted.start({ requestId: '44444444-4444-4444-8444-444444444444' });
+  assert.equal(response.status, 202);
+  assert.equal((await response.json()).exportId, results[0].exportId);
+  assert.equal(restarted.state.starts.length, 0);
+});
+
+for (const change of ['format', 'output', 'run', 'parameters', 'runner code']) {
+  test(`does not reuse cached files for changed ${change}`, async (t) => {
+    const h = await harness(t);
+    const { exportId, root } = await h.ready();
+    const options = {};
+    if (change === 'format') options.format = 'xlsx';
+    if (change === 'output') options.outputId = 'other';
+    if (change === 'run') {
+      h.runs.set(10, structuredClone(h.runs.get(1)));
+      options.sourceRunId = '10';
+    }
+    if (change === 'parameters') h.runs.get(1).overriding_parameters.notebook_params.value = 'changed';
+    if (change === 'runner code') h.state.notebookSource += '\nprint("Changed code")';
+    const response = await h.start(options);
+    assert.equal(response.status, 202);
+    assert.notEqual((await response.json()).exportId, exportId);
+    assert.equal(h.state.starts.length, 2);
+    assert.equal(h.files.has(`${root}/result.csv`), true);
+  });
+}
+
+for (const phase of ['failed', 'cancelled', 'missing', 'incomplete']) {
+  test(`replaces a ${phase} generation without reusing its job or overwriting its files`, async (t) => {
+    const h = await harness(t);
+    const { exportId, root } = await h.ready();
+    if (phase === 'failed') h.runs.get(2).state.result_state = 'FAILED';
+    if (phase === 'cancelled') h.runs.get(2).state.result_state = 'CANCELED';
+    if (phase === 'missing') h.files.delete(`${root}/result.csv`);
+    if (phase === 'incomplete') h.files.set(`${root}/result.csv`, Buffer.from('partial'));
+    const before = new Map(h.files);
+    const regenerated = await h.start({ requestId: '22222222-2222-4222-8222-222222222222' });
+    assert.equal(regenerated.status, 202);
+    const next = await regenerated.json();
+    assert.notEqual(next.exportId, exportId);
+    assert.equal(h.state.starts.length, 2);
+    for (const [path, bytes] of before) {
+      if (!path.includes('/cache/')) assert.deepEqual(h.files.get(path), bytes);
+    }
+    const reused = await (await h.start({ requestId: '33333333-3333-4333-8333-333333333333' })).json();
+    assert.equal(reused.exportId, next.exportId);
+    assert.equal(h.state.starts.length, 2);
+  });
+}
+
+test('checks ownership and execution revision before looking up cached files', async (t) => {
+  const h = await harness(t);
+  await h.ready();
+  h.runs.get(1).overriding_parameters.notebook_params._lb_app_viewer = 'other';
+  assert.equal((await h.start()).status, 404);
+  h.runs.get(1).overriding_parameters.notebook_params._lb_app_viewer = h.viewer;
+  h.state.manifest.blocks[0].port = 'different';
+  assert.equal((await h.start()).status, 409);
+  assert.equal(h.state.starts.length, 1);
+});
+
+test('does not reuse a cache pointer that belongs to a different output', async (t) => {
+  const h = await harness(t);
+  const { exportId } = await h.ready();
+  const cachePath = [...h.files.keys()].find((path) => path.includes('/cache/'));
+  const other = await (await h.start({ outputId: 'other' })).json();
+  await h.store.write(cachePath, { exportId: other.exportId });
+  const response = await h.start({ requestId: '22222222-2222-4222-8222-222222222222' });
+  assert.equal(response.status, 202);
+  const next = await response.json();
   assert.notEqual(next.exportId, exportId);
-  assert.equal(next.phase, 'queued');
-  assert.equal(h.state.starts.length, 2);
-  assert.equal(h.state.starts[1].params.value, 'recorded');
-  const other = await h.start({ outputId: 'other', requestId: '33333333-3333-4333-8333-333333333333' });
-  assert.equal(other.status, 202);
+  assert.notEqual(next.exportId, other.exportId);
   assert.equal(h.state.starts.length, 3);
-  assert.equal(JSON.parse(h.state.starts[2].params._lb_export_request).nodeId, 'other');
+  assert.equal(JSON.parse(h.state.starts[2].params._lb_export_request).nodeId, 'source');
+});
+
+for (const record of ['cache', 'completion']) {
+  test(`does not start duplicate compute when the ${record} store is unavailable`, async (t) => {
+    const h = await harness(t);
+    const { exportId } = await h.ready();
+    const read = h.store.read;
+    h.store.read = async (path) => {
+      if (record === 'cache' ? path.includes('/cache/') : path.endsWith('/completion.json'))
+        throw new Error('Storage unavailable');
+      return read(path);
+    };
+    assert.equal((await h.start()).status, 502);
+    assert.equal(h.state.starts.length, 1);
+    h.store.read = read;
+    const reused = await h.start();
+    assert.equal(reused.status, 200);
+    assert.equal((await reused.json()).exportId, exportId);
+    assert.equal(h.state.starts.length, 1);
+  });
+}
+
+test('recovers a failed cache-pointer write without resubmitting the running job', async (t) => {
+  const h = await harness(t);
+  const write = h.store.write;
+  h.store.write = async () => { throw new Error('Storage unavailable'); };
+  assert.equal((await h.start()).status, 502);
+  assert.equal(h.state.starts.length, 1);
+  h.store.write = write;
+  const retried = await h.start({ requestId: '22222222-2222-4222-8222-222222222222' });
+  assert.equal(retried.status, 202);
+  const { exportId } = await retried.json();
+  assert.equal(exportId, h.state.starts[0].token);
+  assert.equal(h.state.starts.length, 1);
+  const restarted = await harness(t, h);
+  assert.equal((await (await restarted.start()).json()).exportId, exportId);
+  assert.equal(restarted.state.starts.length, 0);
 });
 
 test('rejects cross-viewer download/status/cancel without exposing the artifact', async (t) => {
@@ -433,7 +546,7 @@ test('cancels only the owned export job', async (t) => {
   assert.equal((await (await h.call(`/${exportId}`)).json()).phase, 'cancelled');
 });
 
-test('interrupted transfer releases its lock and retains the artifact for retry', async (t) => {
+test('an interrupted transfer does not block other downloads or consume the cached artifact', async (t) => {
   const h = await harness(t);
   const { exportId, root } = await h.ready();
   h.state.streams = () =>
@@ -444,23 +557,23 @@ test('interrupted transfer releases its lock and retains the artifact for retry'
     });
   const controller = new AbortController();
   const response = await h.call(`/${exportId}/download`, { signal: controller.signal });
-  assert.equal((await h.call(`/${exportId}/download`)).status, 409);
+  h.state.streams = undefined;
+  assert.equal(await (await h.call(`/${exportId}/download`)).text(), 'value\n1\n2\n');
   controller.abort();
   await response.body.cancel().catch(() => {});
-  await h.unlocked;
   assert.equal(h.files.has(`${root}/result.csv`), true);
   assert.equal(h.files.has(`${root}/consumed.json`), false);
-  h.state.streams = undefined;
   assert.equal(await (await h.call(`/${exportId}/download`)).text(), 'value\n1\n2\n');
 });
 
-test('cleanup failure does not turn a completed download into a failed transfer', async (t) => {
+test('allows concurrent downloads without modifying files or metadata', async (t) => {
   const h = await harness(t);
-  const { exportId, root } = await h.ready();
-  h.state.removeError = true;
-  assert.equal(await (await h.call(`/${exportId}/download`)).text(), 'value\n1\n2\n');
-  await h.unlocked;
-  assert.equal(h.files.has(`${root}/result.csv`), true);
-  assert.equal(h.state.reports.length, 1);
-  assert.equal((await (await h.call(`/${exportId}`)).json()).phase, 'consumed');
+  const { exportId } = await h.ready();
+  const before = new Map(h.files);
+  const downloads = await Promise.all(Array.from({ length: 3 }, async () =>
+    (await h.call(`/${exportId}/download`)).text(),
+  ));
+  assert.deepEqual(downloads, Array(3).fill('value\n1\n2\n'));
+  assert.deepEqual(h.files, before);
+  assert.deepEqual(h.state.reports, []);
 });

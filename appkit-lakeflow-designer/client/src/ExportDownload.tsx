@@ -65,8 +65,7 @@ export function ExportDownload({ sourceRunId, outputId }: ExportDownloadProps) {
         const current = await request(`/api/designer/exports/${attempt?.exportId}`, controller.signal);
         setStatus(current);
         setError(undefined);
-        if (['queued', 'running', 'ready'].includes(current.phase))
-          timer = setTimeout(poll, current.phase === 'ready' ? 5000 : 2000);
+        if (['queued', 'running'].includes(current.phase)) timer = setTimeout(poll, 2000);
       } catch (failure) {
         if (!controller.signal.aborted)
           setError(failure instanceof Error ? failure.message : 'Could not check export status.');
@@ -99,7 +98,7 @@ export function ExportDownload({ sourceRunId, outputId }: ExportDownloadProps) {
     };
   }, [attempt, key, sourceRunId, outputId, retry]);
 
-  const busy = attempt !== undefined && (!status || ['queued', 'running'].includes(status.phase));
+  const busy = !error && attempt !== undefined && (!status || ['queued', 'running'].includes(status.phase));
   const generate = (format: ExportFormat) => {
     setStatus(undefined);
     setError(undefined);
@@ -122,14 +121,15 @@ export function ExportDownload({ sourceRunId, outputId }: ExportDownloadProps) {
   return (
     <div className="space-y-2 px-6 py-4" aria-label="Download full data">
       <p className="text-muted-foreground text-xs">
-        Recomputes this output using the run&apos;s parameters and current data. Maximum 1,000,000 rows, 5,000,000 cells
-        and 256 MiB. Completed downloads are removed when possible; generate again to download again.
+        Reuses generated files for this run; otherwise recomputes this output using the run&apos;s parameters and
+        current data. Run the app again for newer data. Maximum 1,000,000 rows, 5,000,000 cells and 256 MiB.
+        Files are retained in the storage volume for repeat downloads and require manual cleanup.
       </p>
       <div className="flex flex-wrap items-center gap-2">
         <Button
           variant="outline"
           size="sm"
-          disabled={busy || status?.phase === 'ready'}
+          disabled={busy}
           onClick={() => generate('csv')}
         >
           Generate CSV
@@ -137,7 +137,7 @@ export function ExportDownload({ sourceRunId, outputId }: ExportDownloadProps) {
         <Button
           variant="outline"
           size="sm"
-          disabled={busy || status?.phase === 'ready'}
+          disabled={busy}
           onClick={() => generate('xlsx')}
         >
           Generate Excel
@@ -162,11 +162,6 @@ export function ExportDownload({ sourceRunId, outputId }: ExportDownloadProps) {
             Download {attempt?.format === 'xlsx' ? 'Excel' : 'CSV'} ({status.rowCount?.toLocaleString()} rows)
           </a>
         )}
-        {(error || status?.phase === 'ready') && (
-          <Button variant="outline" size="sm" onClick={() => generate(attempt?.format ?? 'csv')}>
-            New export
-          </Button>
-        )}
         {error && (
           <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>
             Retry request
@@ -181,11 +176,6 @@ export function ExportDownload({ sourceRunId, outputId }: ExportDownloadProps) {
       {status?.phase === 'failed' && (
         <p role="alert" className="text-sm">
           {status.message ?? 'Export generation failed.'}
-        </p>
-      )}
-      {status?.phase === 'consumed' && (
-        <p role="status" className="text-sm">
-          Export transferred. Generate a new file to download again.
         </p>
       )}
       {status?.phase === 'cancelled' && (

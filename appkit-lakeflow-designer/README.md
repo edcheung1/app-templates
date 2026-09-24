@@ -175,13 +175,20 @@ Authors enable full-data downloads in Designer's App storage settings; the manif
 `exports: true`. Viewers choose Generate CSV or Generate Excel on a successful published table output.
 Visualizations do not show download controls or a row-count footer, even when they fall back to a table.
 The App verifies run ownership, Job identity, output membership, the runner notebook, and an execution revision,
-then starts an idempotent export run using that source run's recorded parameters. Data is recomputed
-at export time, not retrieved from a historical snapshot. The revision covers output IDs/ports and their
+then reuses a matching generated file or pending generation before starting an idempotent export run
+using that source run's recorded parameters. On a cache miss, data is recomputed at export time, not
+retrieved from a historical snapshot. The revision covers output IDs/ports and their
 execution plans, parameter names, and storage location. Presentation changes (labels, layout, chart
 settings, publication timestamps) and new defaults do not invalidate recorded results. Changed runner
 code or execution configuration requires a new App run. Runs using the previous whole-manifest hash
 need one new App run after upgrading this template. Generating or downloading an export does not
 invalidate its source run; subsequent exports can use the same run, including different outputs.
+Cache entries are isolated by viewer, Job, source run, output, format, execution revision, recorded
+parameters and runner notebook path/content. Their index is persisted under
+`<storage.path>/exports/<viewer-hash>/cache/`, so reuse survives browser and server restarts.
+CSV and Excel have independent entries. Failed/cancelled generations and missing/incomplete files
+can be regenerated with a new request ID, without overwriting old artifacts. Changes to upstream
+tables or files are not detected automatically: run the App again to export newer source data.
 Export status includes a **View job run** link once Jobs supplies its run URL, including after failure.
 Opening that link requires the viewer's own workspace/Job permissions; the App does not grant them.
 
@@ -210,12 +217,11 @@ silent truncation. Excel uses a write-only workbook; unsupported Excel cell valu
 actionable error. Formula-like strings are exported as literals. No Output operator is required.
 
 The browser downloads through an authenticated same-origin attachment endpoint. The App server
-streams UC bytes without buffering the full file or exposing a presigned cloud URL. A persisted
-lock prevents concurrent transfers. After a completed server transfer, it marks the artifact
-consumed and attempts to delete the result file. This is not proof that the browser saved it.
-Interrupted transfers retain the artifact for retry; a new generation is required after consumption.
+streams UC bytes without buffering the full file or exposing a presigned cloud URL. Downloads are
+read-only and may run concurrently. Completed and interrupted transfers both retain the artifact;
+the same file can be downloaded repeatedly without starting another Job. No download lock or
+consumption marker is needed.
 
-There is no automatic TTL, cleanup Job, or consumer DELETE endpoint. Abandoned/failed exports,
-failed deletions, request metadata, and locks left by server crashes may require manual volume
-cleanup. A stale download lock requires generating a new export. Uploads and published helper
-versions are never removed by download cleanup.
+There is no automatic TTL, cleanup Job, or consumer DELETE endpoint. Generated files, abandoned
+or failed exports, cache indexes and request metadata remain in the volume until manually removed.
+Downloads never delete exports, uploads or published helper versions.

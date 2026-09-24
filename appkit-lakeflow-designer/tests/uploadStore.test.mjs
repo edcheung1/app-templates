@@ -36,10 +36,11 @@ before(async () => {
     const url = new URL(input);
     assert.equal(url.origin, 'https://workspace.invalid');
     assert.equal(options.method, 'PUT');
-    assert.equal(url.searchParams.get('overwrite'), 'false');
     assert.equal(options.headers.get('Authorization'), 'Bearer test-token');
     const path = decodeURIComponent(url.pathname.slice('/api/2.0/fs/files'.length));
-    if (contents.has(path)) return new Response('Already exists', { status: 409 });
+    const overwrite = url.searchParams.get('overwrite') === 'true';
+    if (overwrite) assert.match(path, /\/exports\/.*\/cache\//);
+    if (contents.has(path) && !overwrite) return new Response('Already exists', { status: 409 });
     const bytes =
       options.body instanceof ReadableStream
         ? Buffer.from(await new Response(options.body).arrayBuffer())
@@ -103,9 +104,9 @@ before(async () => {
 test('export Files store preserves exclusive-create conflicts and observes externally written completion metadata', async () => {
   const store = appKitExportStore(config);
   const root = `${config.path}/exports/viewer/request`;
-  assert.equal(await store.create(`${root}/download.lock`, { owner: 'first' }), true);
-  assert.equal(await store.create(`${root}/download.lock`, { owner: 'second' }), false);
-  assert.deepEqual(await store.read(`${root}/download.lock`), { owner: 'first' });
+  assert.equal(await store.create(`${root}/request.json`, { owner: 'first' }), true);
+  assert.equal(await store.create(`${root}/request.json`, { owner: 'second' }), false);
+  assert.deepEqual(await store.read(`${root}/request.json`), { owner: 'first' });
   assert.equal(await store.read(`${root}/completion.json`), undefined);
   contents.set(`${root}/completion.json`, Buffer.from('{"rowCount":2}'));
   assert.deepEqual(await store.read(`${root}/completion.json`), { rowCount: 2 });
@@ -113,8 +114,12 @@ test('export Files store preserves exclusive-create conflicts and observes exter
   contents.set(`${root}/result.csv`, Buffer.from('value\n1\n2\n'));
   assert.equal(await store.size(`${root}/result.csv`), 10);
   assert.equal(await new Response(await store.download(`${root}/result.csv`)).text(), 'value\n1\n2\n');
-  await store.remove(`${root}/result.csv`);
-  assert.equal(await store.size(`${root}/result.csv`), undefined);
+  assert.equal(await new Response(await store.download(`${root}/result.csv`)).text(), 'value\n1\n2\n');
+  const cachePath = `${config.path}/exports/viewer/cache/key.json`;
+  await store.write(cachePath, { exportId: 'first' });
+  await store.write(cachePath, { exportId: 'second' });
+  assert.deepEqual(await store.read(cachePath), { exportId: 'second' });
+  assert.equal(await store.size(`${root}/result.csv`), 10);
   await assert.rejects(store.create(`${config.path}/uploads/forbidden`, {}));
 });
 
