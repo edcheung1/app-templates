@@ -12,6 +12,7 @@ export type LastRunSummary = {
   setupDurationMs?: number;
   executionDurationMs?: number;
   runPageUrl?: string;
+  resultState?: string;
 };
 
 export type ActiveRun = {
@@ -75,6 +76,7 @@ function parseSummary(raw: unknown): LastRunSummary | undefined {
       ? {}
       : { executionDurationMs: positiveInt(raw.executionDurationMs) }),
     ...(typeof raw.runPageUrl === 'string' && raw.runPageUrl !== '' ? { runPageUrl: raw.runPageUrl } : {}),
+    ...(typeof raw.resultState === 'string' && raw.resultState !== '' ? { resultState: raw.resultState } : {}),
   };
 }
 

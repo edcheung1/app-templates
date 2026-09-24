@@ -407,10 +407,7 @@ export function App() {
   const ownRunSucceeded = state.phase === 'settled' && isSuccessfulResultState(state.snapshot?.resultState);
   const ownFinishedAt = state.startedAt === undefined ? undefined : state.startedAt + state.elapsedMs;
   const followedRunSucceeded = followed.settled && isSuccessfulResultState(followed.snapshot?.resultState);
-  const lastSuccessfulEntry =
-    lastRun.status === 'found'
-      ? runHistoryEntry(lastRun.run, lastRun.parameters, lastRun.parameterDisplayValues)
-      : undefined;
+  const lastSuccessfulEntry = lastSuccessfulRunEntry(lastRun);
   const defaultDisplayedRun =
     state.phase === 'settled'
       ? ownRunSucceeded && state.snapshot !== undefined
@@ -643,6 +640,12 @@ function runHistoryEntry(
     ...(resultState === undefined ? {} : { resultState }),
     ...(lifeCycleState === undefined ? {} : { lifeCycleState }),
   };
+}
+
+export function lastSuccessfulRunEntry(lastRun: LastRunState): RunHistoryEntry | undefined {
+  return lastRun.status === 'found'
+    ? runHistoryEntry(lastRun.run, lastRun.parameters, lastRun.parameterDisplayValues, lastRun.run.resultState)
+    : undefined;
 }
 
 function runHistoryEntryFromSnapshot(snapshot: RunSnapshot, startedAt: number | undefined): RunHistoryEntry {

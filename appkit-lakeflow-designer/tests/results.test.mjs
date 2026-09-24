@@ -9,6 +9,8 @@ import { build } from 'tsdown';
 
 let exportedModelToRunPayload;
 let parseRunOutcome;
+let fetchLastRun;
+let lastSuccessfulRunEntry;
 let ResultFooter;
 let ResultGrid;
 let OutputSection;
@@ -25,6 +27,7 @@ before(async () => {
       ResultFooter: 'client/src/ResultFooter.tsx',
       ResultGrid: 'client/src/ResultGrid.tsx',
       App: 'client/src/App.tsx',
+      lastRun: 'client/src/lastRun.ts',
     },
     config: false,
     tsconfig: 'tsconfig.client.json',
@@ -38,7 +41,8 @@ before(async () => {
   ({ parseRunOutcome } = await import(pathToFileURL(join(outputDirectory, 'payload.mjs')).href));
   ({ ResultFooter } = await import(pathToFileURL(join(outputDirectory, 'ResultFooter.mjs')).href));
   ({ ResultGrid } = await import(pathToFileURL(join(outputDirectory, 'ResultGrid.mjs')).href));
-  ({ OutputSection } = await import(pathToFileURL(join(outputDirectory, 'App.mjs')).href));
+  ({ OutputSection, lastSuccessfulRunEntry } = await import(pathToFileURL(join(outputDirectory, 'App.mjs')).href));
+  ({ fetchLastRun } = await import(pathToFileURL(join(outputDirectory, 'lastRun.mjs')).href));
 });
 
 after(async () => {
@@ -110,6 +114,34 @@ test('tabular outputs retain their row count and enabled download controls', () 
   const withoutDownloads = outputSection(payload, undefined, false);
   assert.match(withoutDownloads, />2 rows</);
   assert.doesNotMatch(withoutDownloads, /Generate CSV|Generate Excel|Recomputes this output/);
+});
+
+test('the initial last-run response enables exports only for a fully successful run', async () => {
+  const originalFetch = globalThis.fetch;
+  const payload = parsePayload(outputFromTable(displayTable(2, false)));
+  try {
+    for (const resultState of ['SUCCESS', 'SUCCESS_WITH_FAILURES']) {
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({
+          status: 'found',
+          run: { jobRunId: '42', resultState },
+          result: { outcome: 'outputs', outputs: [] },
+        }));
+      const lastRun = await fetchLastRun();
+      assert.equal(lastRun.status, 'found');
+      const displayedRun = lastSuccessfulRunEntry(lastRun);
+      assert.equal(displayedRun.jobRunId, '42');
+      const html = outputSection(payload, undefined, displayedRun.resultState === 'SUCCESS');
+      if (resultState === 'SUCCESS') {
+        assert.match(html, />Generate CSV</);
+        assert.match(html, />Generate Excel</);
+      } else {
+        assert.doesNotMatch(html, /Generate CSV|Generate Excel/);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 for (const widgetType of ['line', 'pie', 'unsupported']) {

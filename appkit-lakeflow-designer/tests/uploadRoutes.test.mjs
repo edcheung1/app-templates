@@ -257,6 +257,7 @@ for (const filename of ['sales.csv', 'sales.xlsx', 'data.json', 'data.csv.gz', '
     assert.equal(last.body.status, 'found');
     assert.equal(last.body.run.jobRunId, '10');
     assert.equal(last.body.run.taskRunId, '1010');
+    assert.equal(last.body.run.resultState, 'SUCCESS');
     assert.deepEqual(last.body.parameters, { path: 'upload:829dcaa7-e505-49c1-b6d0-73d1841e990a' });
     assert.deepEqual(last.body.parameterDisplayValues, { path: filename });
     assert.deepEqual(state.outputReads, [1010, 1010]);

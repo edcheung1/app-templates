@@ -899,6 +899,7 @@ await createApp({
           res.json({ status: 'none', ...(active === undefined ? {} : { active }) });
           return;
         }
+        summary.resultState = resultStateOf(run);
 
         const parameterData = runParameterData(run);
 
