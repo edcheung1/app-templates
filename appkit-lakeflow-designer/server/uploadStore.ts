@@ -1,10 +1,10 @@
 import { ApiError } from '@databricks/appkit';
 import type { AppStorage } from '../shared/storageConfig';
 import { UploadError, type UploadStore } from './fileUploads';
-import { createStorageVolume, encodeStoragePath, parseStorageFileSize } from './storageVolume';
+import { createUploadVolume, encodeStoragePath, parseStorageFileSize } from './storageVolume';
 
 let storageVolume: string | undefined;
-let cachedVolume: { path: string; promise: ReturnType<typeof createStorageVolume> } | undefined;
+let cachedVolume: { path: string; promise: ReturnType<typeof createUploadVolume> } | undefined;
 
 async function uploadVolume(config: AppStorage | undefined) {
   if (!config) throw new UploadError(409, 'File uploads are not configured.');
@@ -13,7 +13,7 @@ async function uploadVolume(config: AppStorage | undefined) {
   if (!cachedVolume || cachedVolume.path !== config.path) {
     storageVolume = config.volume;
     // Keep each policy bound to its request's manifest while republishing changes the prefix.
-    const promise = createStorageVolume(config, 'uploads').catch((error) => {
+    const promise = createUploadVolume(config).catch((error) => {
       if (cachedVolume?.promise === promise) cachedVolume = undefined;
       throw error;
     });

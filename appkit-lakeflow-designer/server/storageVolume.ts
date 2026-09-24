@@ -1,5 +1,5 @@
 import { createApp, files } from '@databricks/appkit';
-import type { AppStorage } from '../shared/storageConfig';
+import { uploadStoragePath, type AppStorage } from '../shared/storageConfig';
 
 // AppKit auto-discovers every volume env binding. Deny unrelated handles explicitly, even
 // in backend-only instances, instead of inheriting the plugin's default publicRead policy.
@@ -19,7 +19,7 @@ export function setupStorageVolume<T>(setup: () => Promise<T>): Promise<T> {
   return pending;
 }
 
-export async function createStorageVolume(storage: AppStorage, directory: 'uploads') {
+export async function createUploadVolume(storage: AppStorage) {
   return setupStorageVolume(async () => {
     // The trusted manifest supplies the optional volume resource. Do not require it in app.yaml:
     // ordinary apps have no upload volume, and an existing app can enable uploads on republish.
@@ -34,7 +34,7 @@ export async function createStorageVolume(storage: AppStorage, directory: 'uploa
             files: {
               auth: 'service-principal',
               policy: (_action, resource, user) =>
-                user.isServicePrincipal === true && resource.path.startsWith(`${storage.path}/${directory}/`),
+                user.isServicePrincipal === true && resource.path.startsWith(`${uploadStoragePath(storage)}/`),
             },
           },
         }),
