@@ -18,7 +18,27 @@ import { isReservedParameter } from './runParameters';
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const manifestRevision = (manifest: object): string => digest(manifest);
+const EXPORT_REVISION_PREFIX = 'execution-v1:';
+
+export function manifestRevision(manifest: ExportManifest): string {
+  // Notebook identity is checked separately. Replay uses recorded parameter values, so
+  // labels, defaults, chart settings, publication timestamps and layout are not execution changes.
+  const outputs = manifest.blocks
+    .filter((block) => block.type === 'output')
+    .map((block) => ({
+      id: block.id ?? '',
+      nodeId: block.nodeId,
+      port: block.port,
+      executionNodeIds: block.executionNodeIds,
+    }))
+    .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  return EXPORT_REVISION_PREFIX + digest({
+    exports: manifest.exports === true,
+    storage: manifest.storage && { volume: manifest.storage.volume, path: manifest.storage.path },
+    parameters: manifest.parameters.map((parameter) => parameter.name).sort(),
+    outputs,
+  });
+}
 export const runParameters = (run: unknown): Record<string, unknown> => {
   if (!record(run)) return {};
   const task = Array.isArray(run.tasks) && run.tasks.length === 1 ? run.tasks[0] : undefined;
@@ -232,16 +252,23 @@ export function registerExportRoutes(app: Pick<Application, 'get' | 'post'>, dep
       const sourceParams = runParameters(source);
       const revision = manifestRevision(ctx.manifest);
       const notebookPath = await deps.notebookPath();
-      if (
-        !notebookPath ||
-        !/\/runner-[a-f0-9]{64}\.designer\.py$/.test(notebookPath) ||
-        notebookOf(source) !== notebookPath ||
-        sourceParams[APP_REVISION_PARAM] !== revision
-      )
+      if (!notebookPath || !/\/runner-[a-f0-9]{64}\.designer\.py$/.test(notebookPath))
+        throw new ExportError(409, 'This runner does not support exports. Republish the app and run it again.');
+      if (notebookOf(source) !== notebookPath)
         throw new ExportError(
           409,
-          'The app has been republished or this run predates exports. Run the app again before exporting.',
+          'The runner notebook has changed since this run. Run the app again before exporting.',
         );
+      const sourceRevision = sourceParams[APP_REVISION_PARAM];
+      if (sourceRevision !== revision) {
+        const legacyRevision = typeof sourceRevision !== 'string' || !sourceRevision.startsWith(EXPORT_REVISION_PREFIX);
+        throw new ExportError(
+          409,
+          legacyRevision
+            ? 'This run uses an older export configuration. Run the app again once before generating exports.'
+            : 'The published outputs, execution plans, parameters, or storage have changed since this run. Run the app again before exporting.',
+        );
+      }
       const params: Record<string, string> = {};
       for (const [name, value] of Object.entries(sourceParams)) {
         if (!isReservedParameter(name) && typeof value === 'string') params[name] = value;

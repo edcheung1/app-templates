@@ -174,9 +174,14 @@ execution still require a deployed smoke test; a local build alone does not vali
 Authors enable full-data downloads in Designer's App storage settings; the manifest then has
 `exports: true`. Viewers choose Generate CSV or Generate Excel on a successful published table output.
 Visualizations do not show download controls or a row-count footer, even when they fall back to a table.
-The App verifies run ownership, Job identity, output membership, and the current publication revision,
+The App verifies run ownership, Job identity, output membership, the runner notebook, and an execution revision,
 then starts an idempotent export run using that source run's recorded parameters. Data is recomputed
-at export time, not retrieved from a historical snapshot. A stale publication requires a new App run.
+at export time, not retrieved from a historical snapshot. The revision covers output IDs/ports and their
+execution plans, parameter names, and storage location. Presentation changes (labels, layout, chart
+settings, publication timestamps) and new defaults do not invalidate recorded results. Changed runner
+code or execution configuration requires a new App run. Runs using the previous whole-manifest hash
+need one new App run after upgrading this template. Generating or downloading an export does not
+invalidate its source run; subsequent exports can use the same run, including different outputs.
 Export status includes a **View job run** link once Jobs supplies its run URL, including after failure.
 Opening that link requires the viewer's own workspace/Job permissions; the App does not grant them.
 

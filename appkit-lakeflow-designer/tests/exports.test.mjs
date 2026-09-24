@@ -30,11 +30,14 @@ async function harness(t) {
   const viewer = 'a'.repeat(64);
   const notebookPath = `/Users/author/app/runner-${'b'.repeat(64)}.designer.py`;
   const manifest = {
+    appName: 'Example app',
+    provenance: { publishedAt: 1000 },
     exports: true,
     storage: { volume: 'main.apps.data', path: '/Volumes/main/apps/data/designer_apps/app1' },
     parameters: [{ name: 'value' }],
     blocks: [
       { type: 'output', id: 'out', nodeId: 'source', port: 'data', executionNodeIds: ['ancestor', 'source'] },
+      { type: 'output', id: 'other', nodeId: 'other', port: 'data', executionNodeIds: ['ancestor', 'other'] },
     ],
   };
   const state = {
@@ -185,14 +188,59 @@ test('includes the export job link while queued, running and after failure', asy
 
 test('passes only the selected output plan from the publication, ignoring browser overrides', async (t) => {
   const h = await harness(t);
-  h.state.manifest.blocks.push({
-    type: 'output', id: 'other', nodeId: 'other', port: 'data', executionNodeIds: ['ancestor', 'other'],
-  });
-  h.runs.get(1).overriding_parameters.notebook_params._lb_app_revision = manifestRevision(h.state.manifest);
   const response = await h.start({ outputId: 'other', executionNodeIds: ['source', 'injected'] });
   assert.equal(response.status, 202);
   assert.deepEqual(JSON.parse(h.state.starts[0].params._lb_export_request).executionNodeIds, ['ancestor', 'other']);
   assert.equal(h.state.starts[0].params.ld_display_outputs_for, '');
+});
+
+test('keeps repeated exports of every output valid across presentation-only manifest changes', async (t) => {
+  const h = await harness(t);
+  const sourceRevision = h.runs.get(1).overriding_parameters.notebook_params._lb_app_revision;
+  const before = structuredClone(h.state.manifest);
+  assert.equal((await h.start()).status, 202);
+  assert.deepEqual(h.state.manifest, before);
+
+  h.state.manifest = {
+    ...h.state.manifest,
+    appName: 'Renamed app',
+    subtitle: 'New description',
+    provenance: { publishedAt: 2000 },
+    parameters: [{ name: 'value', label: 'New label', help: 'New help', defaultValue: 'new default' }],
+    blocks: [
+      { type: 'markdown', text: 'New introduction' },
+      ...h.state.manifest.blocks.toReversed().map((block) => ({ ...block, label: 'New output label' })),
+    ],
+  };
+  // Parsing and projecting the same declaration need not preserve object key order.
+  h.state.manifest = JSON.parse(JSON.stringify(h.state.manifest), (_key, value) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).reverse())
+      : value,
+  );
+  assert.equal(manifestRevision(h.state.manifest), sourceRevision);
+  for (const [outputId, requestId] of [
+    ['out', '22222222-2222-4222-8222-222222222222'],
+    ['other', '33333333-3333-4333-8333-333333333333'],
+  ]) {
+    const response = await h.start({ outputId, requestId });
+    assert.equal(response.status, 202, JSON.stringify(await response.json()));
+  }
+  assert.equal(h.state.starts.length, 3);
+  for (const { params } of h.state.starts) {
+    assert.equal(params.value, 'recorded');
+    assert.equal(params.hidden, 'original default');
+    assert.equal(params._lb_app_revision, sourceRevision);
+  }
+});
+
+test('asks legacy runs to refresh once without claiming the app was republished', async (t) => {
+  const h = await harness(t);
+  h.runs.get(1).overriding_parameters.notebook_params._lb_app_revision = 'c'.repeat(64);
+  const response = await h.start();
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /older export configuration/);
+  assert.deepEqual(h.state.starts, []);
 });
 
 for (const plan of [undefined, null, [], ['ancestor'], ['source', 'source'], ['source', ''], ['source', 2], 'source']) {
@@ -209,8 +257,10 @@ for (const plan of [undefined, null, [], ['ancestor'], ['source', 'source'], ['s
 
 test('requires a new source run after the published execution plan changes', async (t) => {
   const h = await harness(t);
-  h.state.manifest.blocks[0].executionNodeIds = ['different', 'source'];
-  assert.equal((await h.start()).status, 409);
+  h.state.manifest.blocks[0].executionNodeIds = ['other', 'source'];
+  const response = await h.start();
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /execution plans/);
   assert.deepEqual(h.state.starts, []);
 });
 
@@ -273,7 +323,29 @@ for (const [name, mutate, status] of [
   [
     'republished notebook',
     (h) => {
-      h.state.notebookPath = '/Users/author/app/runner-new.designer.py';
+      h.state.notebookPath = `/Users/author/app/runner-${'d'.repeat(64)}.designer.py`;
+    },
+    409,
+  ],
+  [
+    'changed output port',
+    (h) => {
+      h.state.manifest.blocks[0].port = 'other_data';
+    },
+    409,
+  ],
+  [
+    'changed output node',
+    (h) => {
+      h.state.manifest.blocks[0].nodeId = 'other';
+      h.state.manifest.blocks[0].executionNodeIds = ['ancestor', 'other'];
+    },
+    409,
+  ],
+  [
+    'changed storage',
+    (h) => {
+      h.state.manifest.storage = { ...h.state.manifest.storage, path: '/Volumes/main/apps/data/designer_apps/app2' };
     },
     409,
   ],
@@ -300,7 +372,7 @@ test('rejects undeclared output, invalid format, and missing identity', async (t
   assert.equal(h.state.starts.length, 0);
 });
 
-test('streams the full artifact and deletes it after transfer, then requires regeneration', async (t) => {
+test('streams and removes the artifact, then regenerates from the same source run', async (t) => {
   const h = await harness(t);
   const { exportId, root } = await h.ready();
   assert.deepEqual(await (await h.call(`/${exportId}`)).json(), {
@@ -318,6 +390,17 @@ test('streams the full artifact and deletes it after transfer, then requires reg
   assert.equal(h.files.has(`${root}/result.csv`), false);
   assert.equal((await (await h.call(`/${exportId}`)).json()).phase, 'consumed');
   assert.equal((await h.call(`/${exportId}/download`)).status, 409);
+  const regenerated = await h.start({ requestId: '22222222-2222-4222-8222-222222222222' });
+  assert.equal(regenerated.status, 202);
+  const next = await regenerated.json();
+  assert.notEqual(next.exportId, exportId);
+  assert.equal(next.phase, 'queued');
+  assert.equal(h.state.starts.length, 2);
+  assert.equal(h.state.starts[1].params.value, 'recorded');
+  const other = await h.start({ outputId: 'other', requestId: '33333333-3333-4333-8333-333333333333' });
+  assert.equal(other.status, 202);
+  assert.equal(h.state.starts.length, 3);
+  assert.equal(JSON.parse(h.state.starts[2].params._lb_export_request).nodeId, 'other');
 });
 
 test('rejects cross-viewer download/status/cancel without exposing the artifact', async (t) => {

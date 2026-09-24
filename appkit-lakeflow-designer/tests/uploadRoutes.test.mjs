@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -327,10 +326,10 @@ test('reads the actual runner source and refuses a legacy target before starting
     ...manifest, exports: true, parameters: [],
     blocks: [{ ...manifest.blocks[0], executionNodeIds: ['source'] }],
   };
-  const configured = await request('get', '/api/designer/config');
-  const revision = createHash('sha256').update(JSON.stringify(configured.body.manifest)).digest('hex');
+  assert.equal((await request('post', '/api/designer/run')).status, 200);
+  const submission = state.submissions[0];
   state.runs = [{
-    ...run(10, 'alice', { _lb_app_revision: revision }),
+    ...run(10, 'alice', submission.notebook_params),
     tasks: [{ run_id: 1010, notebook_task: { notebook_path: state.notebookPath } }],
   }];
 
@@ -345,7 +344,7 @@ test('reads the actual runner source and refuses a legacy target before starting
   assert.deepEqual(state.workspaceReads.filter(({ path }) => path === state.notebookPath), [
     { path: state.notebookPath, format: 'SOURCE' },
   ]);
-  assert.deepEqual(state.submissions, []);
+  assert.deepEqual(state.submissions, [submission]);
 });
 
 test('enables plugin storage on republish and binds a completed upload to a run', async () => {
