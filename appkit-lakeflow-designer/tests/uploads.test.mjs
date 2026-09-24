@@ -41,7 +41,7 @@ const storage = {
 };
 const fileParameter = { name: 'path', type: 'file', label: 'Data', defaultValue: '/Volumes/private/author.csv' };
 const manifest = {
-  version: 5,
+  version: 6,
   appName: 'Uploads',
   storage,
   parameters: [fileParameter],
@@ -110,6 +110,7 @@ test('substitutes only completed owned uploads and stamps ownership for run para
   );
   assert.equal(resolved.ok, true);
   assert.deepEqual(resolved.params, {
+    _lb_file_outputs: '{}',
     path: (await uploads.resolveUpload(store, storage, owner, 'path', saved.reference)).path,
     ld_display_outputs_for: 'source',
     _lb_collect_row_counts: 'true',
@@ -239,6 +240,7 @@ for (const filename of ['data.csv', 'workbook.xlsx', 'workbook.xls', 'data.json'
     assert.deepEqual(await parameters.resolveRunParameters(manifest, { path: saved.reference }, viewer, store), {
       ok: true,
       params: {
+        _lb_file_outputs: '{}',
         path: resolved.path,
         ld_display_outputs_for: 'source',
         _lb_collect_row_counts: 'true',
@@ -290,20 +292,20 @@ test('validates versioned storage and never initializes a file input with the au
     assert.equal(config.parseAppStorage(invalid), undefined);
   }
   const parsed = appConfig.parseAppManifest(manifest);
-  assert.equal(parsed.version, 5);
+  assert.equal(parsed.version, 6);
   assert.deepEqual(parsed.storage, storage);
   assert.equal(parsed.parameters[0].defaultValue, '');
   assert.deepEqual(appConfig.initialValuesFor(parsed, { path: '/Volumes/private/file.csv' }), { path: '' });
   assert.deepEqual(appConfig.initialValuesFor(parsed, { path: 'upload:829dcaa7-e505-49c1-b6d0-73d1841e990a' }), {
     path: '',
   });
-  for (const version of [3, 4, 6]) {
+  for (const version of [3, 4, 5, 7]) {
     assert.equal(appConfig.parseAppManifest({ ...manifest, version }), undefined);
   }
   assert.equal(appConfig.parseAppManifest({ ...manifest, storage: undefined }), undefined);
   const regular = appConfig.parseAppManifest({
     ...manifest,
-    version: 5,
+    version: 6,
     storage: undefined,
     parameters: [{ ...fileParameter, type: 'text' }],
   });
@@ -321,9 +323,72 @@ test('ordinary parameters retain defaults and dropdown validation without owners
   };
   assert.deepEqual(await parameters.resolveRunParameters(regular, {}, undefined, memoryStore()), {
     ok: true,
-    params: { choice: 'A' },
+    params: { choice: 'A', _lb_file_outputs: '{}' },
   });
   assert.equal((await parameters.resolveRunParameters(regular, { choice: 'C' }, undefined, memoryStore())).ok, false);
+});
+
+test('preview-only and empty selections explicitly clear inherited file-output Job policies', async () => {
+  const stalePolicy = JSON.stringify({ output_0: { volumes: ['main.apps.files'] } });
+  for (const blocks of [undefined, [], [manifest.blocks[0]]]) {
+    const resolved = await parameters.resolveRunParameters(
+      { parameters: [], blocks },
+      { _lb_file_outputs: stalePolicy },
+      undefined,
+      memoryStore(),
+    );
+    assert.equal(resolved.ok, true);
+    assert.equal(resolved.params._lb_file_outputs, '{}');
+    assert.equal(resolved.params._lb_app_viewer, undefined);
+    // Jobs may merge request overrides with defaults from a newer, partially published runner.
+    const effectiveParams = { _lb_file_outputs: stalePolicy, ...resolved.params };
+    assert.deepEqual(JSON.parse(effectiveParams._lb_file_outputs), {});
+    if (blocks?.length) assert.equal(resolved.params._lb_collect_row_counts, 'true');
+  }
+});
+
+test('file-output manifest scopes are explicit without requiring upload storage', async () => {
+  const fileManifest = {
+    ...manifest, storage: undefined, parameters: [],
+    blocks: [{ ...manifest.blocks[0], fileOutput: { volumes: ['main.default.files', 'main.default.other'] } }],
+  };
+  const parsed = appConfig.parseAppManifest(fileManifest);
+  assert.deepEqual(parsed.blocks[0].fileOutput, fileManifest.blocks[0].fileOutput);
+  assert.equal(parsed.storage, undefined);
+  for (const fileOutput of [null, {}, { volumes: [] }, { volumes: ['bad'] }, { volumes: ['main.default.files/..'] }]) {
+    assert.equal(appConfig.parseAppManifest({ ...fileManifest, blocks: [{ ...fileManifest.blocks[0], fileOutput }] }), undefined);
+  }
+  const resolved = await parameters.resolveRunParameters(fileManifest, {
+    _lb_file_outputs: JSON.stringify({ source: { volumes: ['main.private.secret'] } }),
+    _lb_collect_row_counts: 'false', _lb_app_viewer: 'attacker',
+  }, 'viewer', memoryStore());
+  assert.equal(resolved.ok, true);
+  assert.deepEqual(JSON.parse(resolved.params._lb_file_outputs), { source: fileManifest.blocks[0].fileOutput });
+  assert.equal(resolved.params._lb_collect_row_counts, 'true');
+  assert.equal(resolved.params._lb_app_viewer, 'viewer');
+  assert.equal((await parameters.resolveRunParameters(fileManifest, {}, undefined, memoryStore())).ok, false);
+});
+
+test('malformed file-output identities cannot silently downgrade an App to preview-only behavior', () => {
+  const preview = manifest.blocks[0];
+  const file = { type: 'output', id: 'file', nodeId: 'output_0', port: 'result', fileOutput: { volumes: ['main.apps.files'] } };
+  for (const blocks of [
+    [preview, { ...file, id: undefined }],
+    [preview, { ...file, id: '' }],
+    [preview, { ...file, id: ' ' }],
+    [preview, { ...file, nodeId: undefined }],
+    [preview, { ...file, nodeId: '' }],
+    [preview, { ...file, id: preview.id }],
+    [{ ...file, id: preview.id }, preview],
+    [preview, file, file],
+    [preview, { ...file, type: 'markdown', text: 'Not a file output' }],
+  ]) {
+    assert.equal(appConfig.parseAppManifest({ ...manifest, storage: undefined, parameters: [], blocks }), undefined);
+  }
+  const ordinary = appConfig.parseAppManifest({
+    ...manifest, storage: undefined, parameters: [], blocks: [preview, { ...preview, id: '' }, preview],
+  });
+  assert.equal(ordinary.blocks.length, 1);
 });
 
 test('rejects mismatched uploads before network transfer, including drag-and-drop selections', async () => {

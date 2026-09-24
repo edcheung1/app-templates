@@ -1,4 +1,5 @@
 import { DISPLAY_ROW_LIMIT, summarizeResultPreview } from '../shared/resultPreview';
+import { FILE_OUTPUTS_MIME_TYPE, MAX_OUTPUT_FILES, type WrittenFiles } from '../shared/fileOutputs';
 
 const RUNNER_PAYLOAD_VERSION = 2;
 const NOTEBOOK_MODEL_ASSIGNMENT = /__DATABRICKS_NOTEBOOK_MODEL = '([^']*)'/;
@@ -83,6 +84,7 @@ function toDisplayTable(entry: unknown) {
 }
 
 function resultEntries(results: unknown): unknown[] {
+  if (isRecord(results) && (results.type === 'table' || results.type === 'mimeBundle')) return [results];
   return isRecord(results) && Array.isArray(results.data) ? results.data : [];
 }
 
@@ -135,11 +137,32 @@ export function exportedModelToRunPayload(exportedHtml: unknown): string | undef
     return undefined;
   }
   const outputs: Record<string, unknown>[] = [];
+  const files: WrittenFiles[] = [];
   for (const command of model.commands) {
     if (!isRecord(command)) {
       continue;
     }
     const keys = displayedCtxKeys(command.command);
+    // Receipts are independent of display results. A successful write must stay downloadable
+    // even if the preview/count fails or this cell deliberately has no tabular preview.
+    for (const entry of resultEntries(command.results)) {
+      if (!isRecord(entry) || entry.type !== 'mimeBundle' || !isRecord(entry.data)) continue;
+      let receipt = entry.data[FILE_OUTPUTS_MIME_TYPE];
+      if (typeof receipt === 'string') {
+        try {
+          receipt = JSON.parse(receipt);
+        } catch {
+          continue;
+        }
+      }
+      if (
+        isRecord(receipt) && typeof receipt.node === 'string' && receipt.node !== '' &&
+        Array.isArray(receipt.files) && receipt.files.length <= MAX_OUTPUT_FILES &&
+        receipt.files.every((file) => isRecord(file) && typeof file.path === 'string')
+      ) {
+        files.push({ node: receipt.node, files: receipt.files.map((file) => ({ path: file.path as string })) });
+      }
+    }
     const rowCounts = exactRowCounts(command.results);
     const tables = resultEntries(command.results).flatMap((entry) => {
       const table = toDisplayTable(entry);
@@ -161,5 +184,5 @@ export function exportedModelToRunPayload(exportedHtml: unknown): string | undef
       });
     });
   }
-  return JSON.stringify({ version: RUNNER_PAYLOAD_VERSION, outputs });
+  return JSON.stringify({ version: RUNNER_PAYLOAD_VERSION, outputs, files });
 }

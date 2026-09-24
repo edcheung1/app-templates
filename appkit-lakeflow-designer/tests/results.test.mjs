@@ -16,6 +16,7 @@ let ResultGrid;
 let OutputSection;
 let outputDirectory;
 const ROW_COUNTS_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.row-counts+json';
+const FILES_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.files+json';
 
 before(async () => {
   // Keep React and AppKit resolvable from the generated modules without copying dependencies.
@@ -74,6 +75,45 @@ function outputFromTable(table) {
   return JSON.parse(exportedModelToRunPayload(html)).outputs[0];
 }
 
+test('file receipts are decoded independently of tables and full counts without shifting display ports', () => {
+  const receipt = { node: 'output_0', files: [{ path: '/Volumes/main/apps/files/sheet.xlsx' }] };
+  const html = notebookHtml([
+    { command: 'write_output()', results: { type: 'listResults', data: [
+      { type: 'mimeBundle', data: { [FILES_MIME_TYPE]: JSON.stringify(receipt) } },
+    ] } },
+    { command: 'display(ctx["source_0.data"])', results: { type: 'listResults', data: [
+      { type: 'mimeBundle', data: { [FILES_MIME_TYPE]: { node: 'output_1', files: [] } } },
+      displayTable(2, true), rowCounts('source_0', { data: 12345 }),
+    ] } },
+  ]);
+  const parsed = JSON.parse(exportedModelToRunPayload(html));
+  assert.deepEqual(parsed.files, [receipt, { node: 'output_1', files: [] }]);
+  assert.equal(parsed.outputs.length, 1);
+  assert.equal(parsed.outputs[0].target_node, 'source_0');
+  assert.equal(parsed.outputs[0].total_row_count, 12345);
+});
+
+test('a singleton file MIME receipt remains available when no preview was produced', () => {
+  const receipt = { node: 'output_0', files: [{ path: '/Volumes/main/apps/files/report.csv' }] };
+  const parsed = JSON.parse(exportedModelToRunPayload(notebookHtml([{
+    command: 'write_file()', results: { type: 'mimeBundle', data: { [FILES_MIME_TYPE]: receipt } },
+  }])));
+  assert.deepEqual(parsed.files, [receipt]);
+  assert.deepEqual(parsed.outputs, []);
+});
+
+test('malformed file receipts do not discard valid sibling receipts or table counts', () => {
+  const invalid = ['not JSON', {}, { node: 'output', files: [{}] },
+    { node: 'output', files: Array.from({ length: 51 }, () => ({ path: '/Volumes/a/b/c/data.csv' })) }];
+  const html = notebookHtml([{ command: 'display(ctx["source_0.data"])', results: { data: [
+    ...invalid.map((receipt) => ({ type: 'mimeBundle', data: { [FILES_MIME_TYPE]: receipt } })),
+    displayTable(1, false), rowCounts('source_0', { data: 1 }),
+  ] } }]);
+  const parsed = JSON.parse(exportedModelToRunPayload(html));
+  assert.deepEqual(parsed.files, []);
+  assert.equal(parsed.outputs[0].total_row_count, 1);
+});
+
 function parsePayload(payload) {
   const result = parseRunOutcome({
     outcome: 'outputs',
@@ -88,58 +128,56 @@ function footer(payload) {
   return renderToStaticMarkup(createElement(ResultFooter, { payload }));
 }
 
-function outputSection(payload, chartSpec, downloads = true) {
+function outputSection(payload, chartSpec, files) {
   return renderToStaticMarkup(createElement(OutputSection, {
     output: {
       key: 'output',
       title: 'Published output',
       undeclared: false,
       chartSpec,
+      files,
       outcome: { outcome: 'result', payload },
     },
     onRetry: () => {},
-    exportRequest: downloads ? { sourceRunId: '42', outputId: 'output' } : undefined,
+    downloadRequest: files ? { runId: '42', outputId: 'output' } : undefined,
   }));
 }
 
-test('tabular outputs retain their row count and enabled download controls', () => {
+test('tabular previews retain full row counts without generic export controls', () => {
   const payload = parsePayload(outputFromTable(displayTable(2, false)));
   const html = outputSection(payload);
   assert.match(html, /<table/);
   assert.match(html, />2 rows</);
-  assert.match(html, />Generate CSV</);
-  assert.match(html, />Generate Excel</);
-  assert.match(html, /Reuses generated files/);
-  assert.match(html, /retained in the storage volume/);
-  assert.doesNotMatch(html, /removed when possible|New export/);
-
-  const withoutDownloads = outputSection(payload, undefined, false);
-  assert.match(withoutDownloads, />2 rows</);
-  assert.doesNotMatch(withoutDownloads, /Generate CSV|Generate Excel|Reuses generated files/);
+  assert.doesNotMatch(html, /Generate CSV|Generate Excel|Download|Reuses generated files/);
+  const fullCount = { ...payload, total_row_count: 5000, truncated: true };
+  assert.match(outputSection(fullCount), /5,000/);
 });
 
-test('the initial last-run response enables exports only for a fully successful run', async () => {
+test('the initial last-run response retains native file downloads without preview results', async () => {
   const originalFetch = globalThis.fetch;
-  const payload = parsePayload(outputFromTable(displayTable(2, false)));
   try {
     for (const resultState of ['SUCCESS', 'SUCCESS_WITH_FAILURES']) {
       globalThis.fetch = async () =>
         new Response(JSON.stringify({
           status: 'found',
           run: { jobRunId: '42', resultState },
-          result: { outcome: 'outputs', outputs: [] },
+          result: { outcome: 'outputs', outputs: [{
+            key: 'declared:output', id: 'output', title: 'Files', files: [{ path: '/Volumes/main/apps/files/data.xlsx' }],
+            outcome: { outcome: 'missing', reason: 'No preview' },
+          }] },
         }));
       const lastRun = await fetchLastRun();
       assert.equal(lastRun.status, 'found');
       const displayedRun = lastSuccessfulRunEntry(lastRun);
       assert.equal(displayedRun.jobRunId, '42');
-      const html = outputSection(payload, undefined, displayedRun.resultState === 'SUCCESS');
-      if (resultState === 'SUCCESS') {
-        assert.match(html, />Generate CSV</);
-        assert.match(html, />Generate Excel</);
-      } else {
-        assert.doesNotMatch(html, /Generate CSV|Generate Excel/);
-      }
+      const html = renderToStaticMarkup(createElement(OutputSection, {
+        output: lastRun.result.outputs[0], onRetry: () => {},
+        downloadRequest: { runId: displayedRun.jobRunId, outputId: 'output' },
+      }));
+      assert.match(html, /Download data.xlsx/);
+      assert.match(html, /\/api\/designer\/run\/42\/files\/output\/0\/download/);
+      assert.match(html, /Later runs may overwrite it/);
+      assert.doesNotMatch(html, /No preview/);
     }
   } finally {
     globalThis.fetch = originalFetch;

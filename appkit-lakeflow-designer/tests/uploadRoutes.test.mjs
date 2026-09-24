@@ -75,7 +75,7 @@ after(async () => {
 });
 
 const manifest = {
-  version: 5,
+  version: 6,
   appName: 'Uploads',
   storage: {
     volume: 'main.default.designer_app1',
@@ -91,7 +91,7 @@ async function serverHarness() {
   const middleware = [];
   const state = {
     manifest, runs: [], listed: [], reads: [], cancelled: [], outputReads: [], submissions: [], apps: [],
-    notebookPath: '/Users/author/app/runner', notebookSource: '', workspaceReads: [],
+    notebookPath: '/Users/author/app/runner', notebookSource: '', workspaceReads: [], commands: undefined,
   };
   const stored = new Map();
   globalThis[harnessKey] = {
@@ -144,7 +144,7 @@ async function serverHarness() {
           const model = Buffer.from(
             encodeURIComponent(
               JSON.stringify({
-                commands: [
+                commands: state.commands ?? [
                   {
                     command: 'display(ctx["source.data"])',
                     results: { type: 'table', schema: [], data: [], overflow: false },
@@ -267,7 +267,7 @@ test('live status preserves ordinary parameters and leaves missing recorded valu
   const { state, request } = await serverHarness();
   state.manifest = {
     ...manifest,
-    version: 5,
+    version: 6,
     storage: undefined,
     parameters: [{ name: 'year', label: 'Year', type: 'text', defaultValue: '2015' }],
   };
@@ -298,58 +298,102 @@ test('rejects unsupported manifest versions and malformed optional storage', asy
   assert.deepEqual(state.submissions, []);
 });
 
-test('preserves published execution plans through the server manifest projection', async () => {
+test('preserves file-output scopes through the server manifest projection without upload storage', async () => {
   const { state, request } = await serverHarness();
   state.manifest = {
-    ...manifest, exports: true,
-    blocks: [{ ...manifest.blocks[0], executionNodeIds: ['ancestor', 'source'] }],
+    ...manifest, storage: undefined, parameters: [],
+    blocks: [{ ...manifest.blocks[0], fileOutput: { volumes: ['main.default.files'] } }],
   };
   const response = await request('get', '/api/designer/config');
-  assert.deepEqual(response.body.manifest.blocks[0].executionNodeIds, ['ancestor', 'source']);
+  assert.deepEqual(response.body.manifest.blocks[0].fileOutput, { volumes: ['main.default.files'] });
+  assert.equal(response.body.manifest.storage, undefined);
 });
 
-test('does not accept a malformed execution plan from the stored manifest', async () => {
+test('does not accept a malformed file-output scope from the stored manifest', async () => {
   const { state, request } = await serverHarness();
   state.manifest = {
-    ...manifest, exports: true,
-    blocks: [{ ...manifest.blocks[0], executionNodeIds: ['ancestor'] }],
+    ...manifest,
+    blocks: [{ ...manifest.blocks[0], fileOutput: { volumes: ['bad/scope'] } }],
   };
   const response = await request('get', '/api/designer/config');
-  assert.equal(response.body.manifest.blocks[0].executionNodeIds, undefined);
+  assert.equal(response.body.manifest, null);
 });
 
-test('reads the actual runner source and refuses a legacy target before starting an export job', async () => {
+test('refuses malformed or duplicate file-output identities before starting an unowned run', async () => {
   const { state, request } = await serverHarness();
-  state.notebookPath = `/Users/author/app/runner-${'b'.repeat(64)}.designer.py`;
-  state.notebookSource = 'display(ctx["source.data"])';
+  const preview = manifest.blocks[0];
+  const file = { type: 'output', id: 'file', nodeId: 'output_0', port: 'result', fileOutput: { volumes: ['main.apps.files'] } };
+  for (const blocks of [
+    [preview, { ...file, id: undefined }],
+    [preview, { ...file, nodeId: undefined }],
+    [preview, { ...file, nodeId: '' }],
+    [preview, { ...file, id: preview.id }],
+    [{ ...file, id: preview.id }, preview],
+    [preview, file, file],
+  ]) {
+    state.manifest = { ...manifest, storage: undefined, parameters: [], blocks };
+    assert.equal((await request('post', '/api/designer/run')).status, 409);
+    assert.equal((await request('get', '/api/designer/config')).body.manifest, null);
+  }
+  assert.deepEqual(state.submissions, []);
+});
+
+test('file-only runs carry server-owned destination, revision, counts and ownership without upload storage', async () => {
+  const { state, request } = await serverHarness();
   state.manifest = {
-    ...manifest, exports: true, parameters: [],
-    blocks: [{ ...manifest.blocks[0], executionNodeIds: ['source'] }],
+    ...manifest, storage: undefined, parameters: [],
+    blocks: [{ ...manifest.blocks[0], fileOutput: { volumes: ['main.default.files'] } }],
   };
   assert.equal((await request('post', '/api/designer/run')).status, 200);
   const submission = state.submissions[0];
-  state.runs = [{
-    ...run(10, 'alice', submission.notebook_params),
-    tasks: [{ run_id: 1010, notebook_task: { notebook_path: state.notebookPath } }],
-  }];
+  assert.deepEqual(JSON.parse(submission.notebook_params._lb_file_outputs), { source: { volumes: ['main.default.files'] } });
+  assert.equal(submission.notebook_params._lb_collect_row_counts, 'true');
+  assert.equal(submission.notebook_params.ld_display_outputs_for, 'source');
+  assert.equal(submission.notebook_params._lb_app_viewer, viewerKey('alice', '100'));
+  assert.match(submission.notebook_params._lb_app_revision, /^file-outputs-v1:/);
+  assert.equal((await request('post', '/api/designer/run', { viewer: '' })).status, 400);
+  state.runs = [run(10, 'alice', submission.notebook_params)];
+  assert.equal((await request('get', '/api/designer/run/:jobRunId', { viewer: 'bob', params: { jobRunId: '10' } })).status, 404);
+});
 
-  const response = await request('post', '/api/designer/exports', {
-    body: {
-      sourceRunId: '10', outputId: 'data', format: 'csv',
-      requestId: '11111111-1111-4111-8111-111111111111',
-    },
+test('preview-only submissions override any stale writer defaults with an explicit empty policy', async () => {
+  const { state, request } = await serverHarness();
+  state.manifest = { ...manifest, storage: undefined, parameters: [] };
+  const response = await request('post', '/api/designer/run', {
+    body: { params: { _lb_file_outputs: '{"hidden_writer":{"volumes":["main.apps.files"]}}' } },
   });
-  assert.equal(response.status, 409);
-  assert.match(response.body.error, /outdated or modified export code/);
-  assert.deepEqual(state.workspaceReads.filter(({ path }) => path === state.notebookPath), [
-    { path: state.notebookPath, format: 'SOURCE' },
-  ]);
-  assert.deepEqual(state.submissions, [submission]);
+  assert.equal(response.status, 200);
+  assert.equal(state.submissions[0].notebook_params._lb_file_outputs, '{}');
+  assert.equal(state.submissions[0].notebook_params._lb_collect_row_counts, 'true');
+  assert.equal(state.submissions[0].notebook_params._lb_app_viewer, undefined);
+});
+
+test('last-run and terminal status include file receipts without table preview or upload storage', async () => {
+  const { state, request } = await serverHarness();
+  state.manifest = {
+    ...manifest, storage: undefined, parameters: [],
+    blocks: [{ type: 'output', id: 'written', nodeId: 'output_0', port: 'result', fileOutput: { volumes: ['main.apps.files'] } }],
+  };
+  const files = [{ path: '/Volumes/main/apps/files/original.xlsx' }];
+  state.commands = [{ command: 'write_file()', results: { data: [{
+    type: 'mimeBundle', data: { 'application/vnd.databricks.lakeflow-designer.files+json': { node: 'output_0', files } },
+  }] } }];
+  state.runs = [run(20, 'bob'), run(10, 'alice')];
+  state.listed = state.runs.map(({ run_id, job_id }) => ({ run_id, job_id }));
+  const last = await request('get', '/api/designer/last-run');
+  assert.equal(last.body.status, 'found');
+  assert.equal(last.body.run.jobRunId, '10');
+  assert.equal(last.body.result.outcome, 'outputs');
+  assert.deepEqual(last.body.result.outputs[0].files, files);
+  assert.equal(last.body.result.outputs[0].outcome.outcome, 'missing');
+  state.runs[1].state.result_state = 'FAILED';
+  const partial = await request('get', '/api/designer/run/:jobRunId', { params: { jobRunId: '10' } });
+  assert.deepEqual(parseRunSnapshot(partial.body).result.outputs[0].files, files);
 });
 
 test('enables plugin storage on republish and binds a completed upload to a run', async () => {
   const { state, request } = await serverHarness();
-  state.manifest = { ...manifest, version: 5, storage: undefined, parameters: [] };
+  state.manifest = { ...manifest, version: 6, storage: undefined, parameters: [] };
   assert.equal((await request('post', '/api/designer/run')).status, 200);
   assert.deepEqual(state.apps.map((plugins) => plugins.map(({ name }) => name)), [['server']]);
 
@@ -417,7 +461,7 @@ test('denies cross-viewer results and cancellation at the server routes', async 
 test('requires ingress identity and uploaded references, and fails closed on invalid published configuration', async () => {
   const { state, request } = await serverHarness();
   const configured = await request('get', '/api/designer/config');
-  assert.equal(configured.body.manifest.version, 5);
+  assert.equal(configured.body.manifest.version, 6);
   assert.deepEqual(configured.body.manifest.storage, manifest.storage);
   assert.equal(configured.body.manifest.parameters[0].defaultValue, '');
   const missingIdentity = await request('post', '/api/designer/uploads/:parameterName', {

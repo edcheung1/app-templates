@@ -16,9 +16,8 @@ Per-app differences are injected at deploy time rather than baked into the sourc
 
 - `server/server.ts` — the Node/AppKit server (TypeScript). Type-checked and bundled by
   `build:server` (`tsc -b` + `tsdown`) to `dist/server.js`, which `start` runs.
-- `server/uploads.ts` / `server/exports.ts` — upload and on-demand export routes. Their store
-  adapters share AppKit volume setup and SDK normalization in `server/storageVolume.ts`, with
-  separate upload/export subtree policies, caches, and error handling.
+- `server/uploads.ts` / `server/outputFiles.ts` — upload and native Output-file download routes.
+  Backend-only AppKit Files adapters enforce separate upload and read-only output policies.
 - `client/` — the React client, built by Vite to `client/dist`.
 - `app.yaml` — start command and env bindings (`command: ['npm', 'run', 'start']`).
 - `tsconfig.shared.json` / `tsconfig.server.json` / `tsconfig.client.json` — a strict shared base
@@ -102,13 +101,13 @@ updates, normalize any proxy URLs in the lockfile without changing versions or i
 hashes; changing npm's registry setting alone does not rewrite existing lockfile URLs.
 Chart rendering does not change the manifest or runner-job contracts.
 
-## Shared App storage and file upload parameters
+## App upload storage and file parameters
 
-Manifest v5 uses one optional storage declaration for uploads and on-demand exports:
+Manifest v6 uses an optional storage declaration for uploads:
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "storage": {
     "volume": "main.apps.shared",
     "path": "/Volumes/main/apps/shared/designer_apps/my_app",
@@ -117,17 +116,16 @@ Manifest v5 uses one optional storage declaration for uploads and on-demand expo
 }
 ```
 
-The server/client accept v5 only. Apps without file parameters or exports may omit storage; a file
-parameter or `exports: true` without valid storage is rejected. File inputs are never downgraded
+The server/client accept v6 only. Apps without file parameters may omit upload storage; a file
+parameter without valid storage is rejected. File inputs are never downgraded
 to text or the author's original source path.
 Update the template and republish existing apps together; there is no legacy-manifest fallback.
-The app is unavailable between the template update and the v5 manifest write.
+The app is unavailable between the template update and the v6 manifest write.
 Deploy this template before enabling Designer's `enableDesignerApps` flag; uploads share that gate.
 
 The author selects a UC volume in Designer; publishing binds it without creating another volume.
 The existing `designer_uploads` App resource with `WRITE_VOLUME` gives the app service
-principal read/write access; the runner job's run-as principal also needs read access and, for
-exports, write access. Uploads
+principal read/write access; the runner job's run-as principal also needs read access. Uploads
 use AppKit's Files plugin, not workspace files or app-container disk. No operator code changes are needed.
 The plugin is initialized lazily from the manifest in a backend-only AppKit instance (no server plugin).
 Its generic file-browser routes are never mounted; the Designer routes enforce viewer/parameter ownership.
@@ -147,7 +145,7 @@ This is extension validation, not content or schema validation: renamed or malfo
 reach the reader. Uploading never changes the Source format, read options (including Excel
 sheet/range), or expected columns. Parse/schema errors are reported by the normal Job run.
 
-The app requires the authenticated `x-forwarded-user` header supplied by Databricks Apps ingress.
+Apps with uploads or file Outputs require the authenticated `x-forwarded-user` header supplied by Databricks Apps ingress.
 Do not expose this server directly to untrusted traffic that can supply its own identity headers.
 There is no anonymous/local-development fallback. Uploads are partitioned by job, viewer and
 parameter. Run submissions carry a server-owned `_lb_app_viewer` parameter; history, result reads,
@@ -158,8 +156,8 @@ Uploaded files are retained until the volume owner deletes them. There is no aut
 delete action, or deletion of storage when an App is deleted. The app does not expose retained files
 for selection; viewers select a local file for each browser session. Manual cleanup must account for queued, running, retrying jobs.
 Uploads use `<storage.path>/uploads/<viewer-hash>/<parameter-hash>/<upload-id>/<filename>`.
-Exports use `<storage.path>/exports/<viewer-hash>/<request-hash>/`. Separate backend-only Files
-plugin policies restrict upload and export operations to their respective subtrees.
+File Outputs write directly to their author-configured destinations. Separate backend-only Files
+plugin policies restrict uploads to their subtree and native downloads to approved output volumes.
 Existing files are not moved or deleted; viewers upload a new file after the app adopts the new root.
 The Files plugin refreshes its path policy when the manifest root changes within the same volume; no restart is needed.
 Replacing the bound volume remains unsupported.
@@ -169,59 +167,66 @@ policy with an in-memory storage boundary, plus server-route access checks and h
 Actual Apps ingress, UC provisioning/grants and Jobs
 execution still require a deployed smoke test; a local build alone does not validate those services.
 
-## On-demand CSV and Excel downloads
+## Native Output-file downloads
 
-Authors enable full-data downloads in Designer's App storage settings; the manifest then has
-`exports: true`. Viewers choose Generate CSV or Generate Excel on a successful published table output.
-Visualizations do not show download controls or a row-count footer, even when they fall back to a table.
-The App verifies run ownership, Job identity, output membership, the runner notebook, and an execution revision,
-then reuses a matching generated file or pending generation before starting an idempotent export run
-using that source run's recorded parameters. On a cache miss, data is recomputed at export time, not
-retrieved from a historical snapshot. The revision covers output IDs/ports and their
-execution plans, parameter names, and storage location. Presentation changes (labels, layout, chart
-settings, publication timestamps) and new defaults do not invalidate recorded results. Changed runner
-code or execution configuration requires a new App run. Runs using the previous whole-manifest hash
-need one new App run after upgrading this template. Generating or downloading an export does not
-invalidate its source run; subsequent exports can use the same run, including different outputs.
-Cache entries are isolated by viewer, Job, source run, output, format, execution revision, recorded
-parameters and runner notebook path/content. Their index is persisted under
-`<storage.path>/exports/<viewer-hash>/cache/`, so reuse survives browser and server restarts.
-CSV and Excel have independent entries. Failed/cancelled generations and missing/incomplete files
-can be regenerated with a new request ID, without overwriting old artifacts. Changes to upstream
-tables or files are not detected automatically: run the App again to export newer source data.
-Export status includes a **View job run** link once Jobs supplies its run URL, including after failure.
-Opening that link requires the viewer's own workspace/Job permissions; the App does not grant them.
+Authors publish file-configured Output v4 operators to offer downloads. CSV, JSON and XLSX use
+the operator's existing writer, including workbook sheets/ranges and split files. Table and
+materialized-view Outputs are not supported. Ordinary operators still publish previews and
+full row counts but no longer offer generic full-data export generation.
 
-For download-enabled apps, each output block in `designerApp.json` contains `executionNodeIds`:
-the target and its ancestors, computed at publication with Designer's Run up to graph helper.
-The manifest remains beside the runner in Workspace files, not in the storage volume. The server
-passes the selected output's plan in `_lb_export_request`; the browser cannot choose execution nodes.
-Missing/invalid plans require republishing. Republish installs the updated manifest, helper, and runner;
-then run the App again before exporting. Oversized plans/parameters are rejected before Job submission.
-The server also checks the current runner source for the target export hook and execution guards;
-outdated or modified runners require republishing instead of starting a job that cannot export.
-Treat published runners as deployment artifacts: edit the original Designer document and republish.
+Each selected file Output has an explicit volume allowlist in the trusted Workspace manifest:
 
-The Python helper lives in Universe alongside shared operator codegen, not in this Node.js app.
-Designer publishes a content-addressed `.py` file beside the runner notebook and pins the generated
-imports to it. The dormant hook also serves full row counts on ordinary App runs. Normal Designer
-runs do not import it. Every operator's wiring has a small `should_run(node_id)` guard; export runs skip
-unrelated config evaluation, input lookups, operator execution, checkpoints, and output hooks.
-Ordinary App runs still execute all published branches. Operator function definitions/imports remain
-at module scope. Export runs disable preview displays/counts, write just the selected output,
-then exit. The Job's run-as identity must read the helper and write to the volume; Excel generation
-additionally requires `openpyxl==3.1.5` in the Job environment.
+```json
+{
+  "type": "output",
+  "id": "output_0_result",
+  "nodeId": "output_0",
+  "port": "result",
+  "label": "Saved report",
+  "fileOutput": { "volumes": ["main.apps.reports", "main.apps.team_reports"] }
+}
+```
 
-Both formats have hard limits of 1,000,000 data rows, 5,000,000 data cells, and 256 MiB, with no
-silent truncation. Excel uses a write-only workbook; unsupported Excel cell values fail with an
-actionable error. Formula-like strings are exported as literals. No Output operator is required.
+Consumers may parameterize directories, filenames and destinations within those approved volumes.
+The runner resolves and validates actual destination paths before writing. The App server passes
+`_lb_file_outputs` as a server-owned node-to-policy map, plus viewer ownership and execution revision.
+Neither browser parameters nor recorded metadata can add an unapproved destination.
+Publishing grants the App service principal read access to the selected output volumes. The Job's
+run-as identity independently needs permission to write there; App resource bindings do not grant
+the publisher extra permissions. Running the App has write side effects with that identity.
+Approval covers the **entire volume**, not a directory prefix. Only recorded Output artifacts are
+downloadable through the App, but consumers may target existing files anywhere in an approved volume.
+Use dedicated volumes for isolation. Append and Excel range/sheet writes can preserve prior file
+contents; downloading the resulting file exposes those prior rows or other sheets as well.
 
-The browser downloads through an authenticated same-origin attachment endpoint. The App server
-streams UC bytes without buffering the full file or exposing a presigned cloud URL. Downloads are
-read-only and may run concurrently. Completed and interrupted transfers both retain the artifact;
-the same file can be downloaded repeatedly without starting another Job. No download lock or
-consumption marker is needed.
+After a successful write, the Python runtime emits a structured MIME receipt
+(`application/vnd.databricks.lakeflow-designer.files+json`) naming the exact written files.
+These receipts are read separately from previews/counts so files remain available if a later preview
+or sibling branch fails. Split outputs offer individual links, up to 50 files; there is no ZIP or
+second format conversion. An empty split result has no downloadable files. Excel downloads contain
+the entire workbook, and append downloads include the entire saved destination, not only new rows.
 
-There is no automatic TTL, cleanup Job, or consumer DELETE endpoint. Generated files, abandoned
-or failed exports, cache indexes and request metadata remain in the volume until manually removed.
-Downloads never delete exports, uploads or published helper versions.
+The authenticated endpoint accepts only run/output/index IDs. It verifies viewer ownership, Job,
+completed run, selected Output, matching recorded policy/revision, and the current content-addressed
+runner notebook path before resolving the recorded canonical file path. Presentation-only manifest
+changes do not invalidate downloads. Changed execution configuration requires another App run.
+Treat generated runner files as immutable deployment artifacts; edit in Designer and republish.
+
+The App server streams UC bytes through backend-only AppKit Files handles using its service principal.
+No storage credentials or presigned URLs reach the browser. No new Job, SQL warehouse, second file,
+staging volume, export cache, or deletion is involved. Upload storage is not required for file-only Apps.
+Completed and interrupted downloads retain the original file for repeated and concurrent downloads.
+
+Downloads read the **current contents of the recorded destination**, not a per-run snapshot.
+Overwrites by another viewer, App, Job or external writer can change what an older run downloads. Use unique directories or
+filenames for run isolation; shared destinations need deliberate concurrency and overwrite policy.
+Receipt availability follows Jobs output retention. A missing/deleted file produces a readable error.
+Native writer size and format limits apply; downloads do not silently truncate or reserialize files.
+
+Full row counts remain enabled by `_lb_collect_row_counts` and `ld_display_outputs_for`, using the
+same shared Python helper and structured count results as before. Visualizations hide the count label.
+File receipts are emitted before result readback/counting and do not consume a preview-table ordinal.
+
+There is no automatic TTL, cleanup Job, or consumer DELETE endpoint. Volume owners manage retention.
+Upgrading removes the generic export endpoints but does not delete previously staged exports, cache
+metadata, uploads, Output files or published helper versions. Republish and run again after upgrading.

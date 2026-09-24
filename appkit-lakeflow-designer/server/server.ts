@@ -6,9 +6,15 @@ import { canAccessRun, viewerKey } from './fileUploads';
 import { appKitUploadStore } from './uploadStore';
 import { registerUploadRoutes } from './uploads';
 import { isReservedParameter, resolveRunParameters } from './runParameters';
-import { isExportRun, manifestRevision, registerExportRoutes } from './exports';
-import { appKitExportStore } from './exportStore';
-import { APP_REVISION_PARAM, isExecutionPlan } from '../shared/exportConfig';
+import { isLegacyExportRun, manifestRevision } from './runRevision';
+import { registerOutputFileRoutes, recordedOutputFiles } from './outputFiles';
+import { appKitOutputFileStore } from './outputFileStore';
+import {
+  APP_REVISION_PARAM,
+  hasInvalidFileOutputDeclaration,
+  parseFileOutput,
+  type FileOutputConfig,
+} from '../shared/fileOutputs';
 import { isFileFormats } from '../shared/fileFormats';
 
 // Each published app's manifest is written by the publish flow beside the runner notebook, in the
@@ -18,7 +24,7 @@ import { isFileFormats } from '../shared/fileFormats';
 // grant), then looks for the manifest file there. It lives outside the git-backed source and outside
 // client/dist, so it is never served publicly.
 const MANIFEST_FILENAME = 'designerApp.json';
-const MANIFEST_VERSION = 5;
+const MANIFEST_VERSION = 6;
 const NO_OUTPUT_REASON = 'The run finished but returned no output. The notebook did not call dbutils.notebook.exit().';
 const NO_OUTPUTS_REASON =
   'The run finished but returned a payload with no outputs. The notebook was published with nothing to return.';
@@ -55,10 +61,9 @@ type AppBlock =
       nodeId: string;
       port: string;
       chartSpec?: Record<string, unknown>;
-      executionNodeIds?: string[];
+      fileOutput?: FileOutputConfig;
     };
 type AppManifest = {
-  exports?: boolean;
   storage?: AppStorage;
   version: number;
   appName: string;
@@ -245,8 +250,7 @@ function parseManifest(raw: unknown): AppManifest | undefined {
   }
   const storage = parseAppStorage(parsed.storage);
   if (
-    (parsed.exports !== undefined && typeof parsed.exports !== 'boolean') ||
-    (parsed.exports === true && !storage) ||
+    hasInvalidFileOutputDeclaration(parsed.blocks) ||
     (parsed.storage !== undefined && !storage) ||
     (parsed.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !storage) ||
     parsed.parameters.some((entry) =>
@@ -290,7 +294,6 @@ function parseManifest(raw: unknown): AppManifest | undefined {
   });
   return {
     version: parsed.version,
-    ...(parsed.exports === true ? { exports: true } : {}),
     ...(storage === undefined ? {} : { storage }),
     appName: parsed.appName,
     ...(typeof parsed.subtitle === 'string' && parsed.subtitle !== '' ? { subtitle: parsed.subtitle } : {}),
@@ -335,9 +338,7 @@ function parseBlocks(raw: unknown): AppBlock[] {
       label: typeof entry.label === 'string' ? entry.label : '',
       nodeId: typeof entry.nodeId === 'string' ? entry.nodeId : '',
       port: typeof entry.port === 'string' ? entry.port : '',
-      ...(typeof entry.nodeId === 'string' && isExecutionPlan(entry.executionNodeIds, entry.nodeId)
-        ? { executionNodeIds: [...entry.executionNodeIds] }
-        : {}),
+      ...(parseFileOutput(entry.fileOutput) ? { fileOutput: parseFileOutput(entry.fileOutput) } : {}),
       ...(chartSpec === undefined ? {} : { chartSpec }),
     });
   }
@@ -365,9 +366,13 @@ async function accessibleRun(
     detail = await wsClient().jobs.getRun({ run_id: Number(id) });
   }
   return isRecord(detail) &&
-    !isExportRun(detail) &&
+    !isLegacyExportRun(detail) &&
     runBelongsToJob(detail, JOB_ID) &&
-    canAccessRun(detail, requestViewer(req), manifest.storage !== undefined)
+    canAccessRun(
+      detail,
+      requestViewer(req),
+      manifest.storage !== undefined || manifest.blocks.some((block) => block.type === 'output' && block.fileOutput),
+    )
     ? detail
     : undefined;
 }
@@ -470,6 +475,7 @@ type OutputSection = {
   title: string;
   source?: string;
   chartSpec?: Record<string, unknown>;
+  files?: { path: string }[];
   undeclared: boolean;
   outcome: MatchOutcome;
 };
@@ -482,10 +488,10 @@ function matchedOutcome(entry: ClassifiedEntry): MatchOutcome {
 
 function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
   const multi = classifyMultiRunOutput(raw);
-  if (multi.outcome !== 'outputs') {
+  if (multi.outcome !== 'outputs' && !declared.some((block) => block.fileOutput)) {
     return { outcome: 'noPayload', reason: multi.reason };
   }
-  const classified = multi.outputs;
+  const classified = multi.outcome === 'outputs' ? multi.outputs : [];
   const consumed = new Set<number>();
   // A node that has a published output block exposes only the port(s) the author selected. Its other
   // ports still arrive in the run payload (the runner displays every port of a displayed node), but
@@ -520,6 +526,7 @@ function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
       ...(source === undefined ? {} : { source }),
 
       ...(output.chartSpec === undefined ? {} : { chartSpec: output.chartSpec }),
+      ...(output.fileOutput ? { files: recordedOutputFiles(raw, output.nodeId, output.fileOutput) ?? [] } : {}),
       undeclared: false,
     };
     if (found === undefined) {
@@ -770,7 +777,7 @@ await createApp({
         next();
       });
 
-      registerExportRoutes(app, {
+      registerOutputFileRoutes(app, {
         jobId: JOB_ID,
         manifest: () => loadManifest(true),
         viewer: requestViewer,
@@ -779,21 +786,10 @@ await createApp({
           const tasks = job.settings?.tasks;
           return tasks?.length === 1 ? tasks[0].notebook_task?.notebook_path : undefined;
         },
-        notebookSource: async (path) => {
-          const exported = await wsClient().toLegacyWorkspaceClient().workspace.export({ path, format: 'SOURCE' });
-          return typeof exported.content === 'string'
-            ? Buffer.from(exported.content, 'base64').toString('utf8')
-            : undefined;
-        },
         getRun: (run_id) => wsClient().jobs.getRun({ run_id }),
-        start: async (notebook_params, idempotency_token) => {
-          const run = await wsClient().jobs.runNow({ job_id: Number(JOB_ID), notebook_params, idempotency_token });
-          if (!run.run_id) throw new Error('The export job returned no run id.');
-          return run.run_id;
-        },
-        cancel: async (run_id) => { await wsClient().jobs.cancelRun({ run_id }); },
-        store: appKitExportStore,
-        report: (error) => console.error('Export request failed', error),
+        readPayload: readRunOutputPayload,
+        store: appKitOutputFileStore,
+        report: (error) => console.error('Output file download failed', error),
       });
 
       registerUploadRoutes(app, {
@@ -1013,7 +1009,10 @@ await createApp({
           return;
         }
 
-        if (resultState === undefined || !SUCCESSFUL_RESULT_STATES.has(resultState)) {
+        if (
+          (resultState === undefined || !SUCCESSFUL_RESULT_STATES.has(resultState)) &&
+          !(await declaredOutputs()).some((block) => block.fileOutput)
+        ) {
           res.json({
             ...snapshot,
             result: {

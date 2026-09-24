@@ -1,6 +1,7 @@
 import type { AppStorage } from '../shared/storageConfig';
 import { APP_VIEWER_PARAM, UploadError, resolveUpload, type UploadStore } from './fileUploads';
 import { validateFileFormat } from '../shared/fileFormats';
+import { FILE_OUTPUTS_PARAM, type FileOutputConfig } from '../shared/fileOutputs';
 
 export function isReservedParameter(name: string): boolean {
   return name === 'target_node' || name === 'ld_display_outputs' || name === 'ld_display_outputs_for' || name.startsWith('_lb_');
@@ -8,7 +9,7 @@ export function isReservedParameter(name: string): boolean {
 
 interface ParameterManifest {
   storage?: AppStorage;
-  blocks?: { type: string; nodeId?: string }[];
+  blocks?: { type: string; nodeId?: string; fileOutput?: FileOutputConfig }[];
   parameters: {
     name: string;
     label: string;
@@ -39,8 +40,14 @@ export async function resolveRunParameters(
   store: UploadStore,
 ): Promise<{ ok: true; params: Record<string, string> } | { ok: false; error: string }> {
   const params: Record<string, string> = {};
-  if (manifest.storage && !viewer)
-    return { ok: false, error: 'Sign in through Databricks Apps to run an app with uploads.' };
+  const fileOutputs = Object.fromEntries(
+    (manifest.blocks ?? []).flatMap((block) =>
+      block.type === 'output' && block.nodeId && block.fileOutput ? [[block.nodeId, block.fileOutput]] : [],
+    ),
+  );
+  const privateApp = manifest.storage !== undefined || Object.keys(fileOutputs).length > 0;
+  if (privateApp && !viewer)
+    return { ok: false, error: 'Sign in through Databricks Apps to run an app with uploads or file outputs.' };
   for (const parameter of manifest.parameters) {
     if (isReservedParameter(parameter.name)) continue;
     const raw = submitted[parameter.name];
@@ -77,6 +84,9 @@ export async function resolveRunParameters(
     params[DISPLAY_OUTPUTS_FOR_PARAM] = displayedNodes;
     params[COLLECT_ROW_COUNTS_PARAM] = 'true';
   }
-  if (manifest.storage && viewer) params[APP_VIEWER_PARAM] = viewer;
+  // An empty override is intentional: a partially completed republish may leave newer
+  // file-writing Job defaults behind the current manifest. Never inherit that policy.
+  params[FILE_OUTPUTS_PARAM] = JSON.stringify(fileOutputs);
+  if (privateApp && viewer) params[APP_VIEWER_PARAM] = viewer;
   return { ok: true, params };
 }

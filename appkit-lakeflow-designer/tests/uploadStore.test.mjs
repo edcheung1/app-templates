@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ApiError, createApp } from '@databricks/appkit';
 import { build } from 'tsdown';
 
-let outputDirectory, appKitUploadStore, appKitExportStore;
+let outputDirectory, appKitUploadStore, appKitOutputFileStore;
 const contents = new Map();
 const directories = new Set();
 const config = {
@@ -39,7 +39,7 @@ before(async () => {
     assert.equal(options.headers.get('Authorization'), 'Bearer test-token');
     const path = decodeURIComponent(url.pathname.slice('/api/2.0/fs/files'.length));
     const overwrite = url.searchParams.get('overwrite') === 'true';
-    if (overwrite) assert.match(path, /\/exports\/.*\/cache\//);
+    assert.equal(overwrite, false);
     if (contents.has(path) && !overwrite) return new Response('Already exists', { status: 409 });
     const bytes =
       options.body instanceof ReadableStream
@@ -90,7 +90,7 @@ before(async () => {
   });
   outputDirectory = await mkdtemp(fileURLToPath(new URL('../.upload-store-tests-', import.meta.url)));
   await build({
-    entry: { uploadStore: 'server/uploadStore.ts', exportStore: 'server/exportStore.ts' },
+    entry: { uploadStore: 'server/uploadStore.ts', outputFileStore: 'server/outputFileStore.ts' },
     config: false,
     tsconfig: 'tsconfig.server.json',
     outDir: outputDirectory,
@@ -98,29 +98,26 @@ before(async () => {
     logLevel: 'silent',
   });
   ({ appKitUploadStore } = await import(pathToFileURL(join(outputDirectory, 'uploadStore.mjs')).href));
-  ({ appKitExportStore } = await import(pathToFileURL(join(outputDirectory, 'exportStore.mjs')).href));
+  ({ appKitOutputFileStore } = await import(pathToFileURL(join(outputDirectory, 'outputFileStore.mjs')).href));
 });
 
-test('export Files store preserves exclusive-create conflicts and observes externally written completion metadata', async () => {
-  const store = appKitExportStore(config);
-  const root = `${config.path}/exports/viewer/request`;
-  assert.equal(await store.create(`${root}/request.json`, { owner: 'first' }), true);
-  assert.equal(await store.create(`${root}/request.json`, { owner: 'second' }), false);
-  assert.deepEqual(await store.read(`${root}/request.json`), { owner: 'first' });
-  assert.equal(await store.read(`${root}/completion.json`), undefined);
-  contents.set(`${root}/completion.json`, Buffer.from('{"rowCount":2}'));
-  assert.deepEqual(await store.read(`${root}/completion.json`), { rowCount: 2 });
-  assert.equal(await store.size(`${root}/result.csv`), undefined);
-  contents.set(`${root}/result.csv`, Buffer.from('value\n1\n2\n'));
-  assert.equal(await store.size(`${root}/result.csv`), 10);
-  assert.equal(await new Response(await store.download(`${root}/result.csv`)).text(), 'value\n1\n2\n');
-  assert.equal(await new Response(await store.download(`${root}/result.csv`)).text(), 'value\n1\n2\n');
-  const cachePath = `${config.path}/exports/viewer/cache/key.json`;
-  await store.write(cachePath, { exportId: 'first' });
-  await store.write(cachePath, { exportId: 'second' });
-  assert.deepEqual(await store.read(cachePath), { exportId: 'second' });
-  assert.equal(await store.size(`${root}/result.csv`), 10);
-  await assert.rejects(store.create(`${config.path}/uploads/forbidden`, {}));
+test('native output Files store reads exact original bytes repeatedly across separate volumes', async () => {
+  await Promise.all(['main.default.output_one', 'main.default.output_two'].map(async (volume) => {
+    const store = appKitOutputFileStore(volume);
+    const root = `/Volumes/${volume.replaceAll('.', '/')}`;
+    for (const name of ['result.csv', 'multi sheet.xlsx', 'データ.json', 'data #1?100%.csv']) {
+      const path = `${root}/reports/${name}`;
+      assert.equal(await store.size(path), undefined);
+      contents.set(path, Buffer.from('original bytes'));
+      assert.equal(await store.size(path), 14);
+      assert.equal(await new Response(await store.download(path)).text(), 'original bytes');
+      assert.equal(await new Response(await store.download(path)).text(), 'original bytes');
+      assert.equal(contents.get(path).toString(), 'original bytes');
+    }
+    for (const path of ['/Volumes/main/default/other/report.csv', `${root}/../other/report.csv`, `${root}/code.py`])
+      await assert.rejects(store.download(path));
+    assert.deepEqual(Object.keys(store).sort(), ['download', 'size']);
+  }));
 });
 
 after(async () => {
@@ -166,6 +163,21 @@ test('uses the Files plugin for immutable storage, bounded records, metadata and
   assert.equal(contents.get(streamedPath).toString(), 'streamed');
   await store.delete(`${folder}/data.csv`);
   await assert.rejects(store.read(`${folder}/data.csv`), { status: 404 });
+});
+
+test('uploads and native output reads can share one physical volume without sharing handle policies', async () => {
+  const uploadStore = appKitUploadStore(config);
+  const outputStore = appKitOutputFileStore(config.volume);
+  const outputPath = '/Volumes/main/default/designer_app1/reports/finished.xlsx';
+  const uploadPath = `${config.path}/uploads/viewer/parameter/incoming.csv`;
+  contents.set(outputPath, Buffer.from('original workbook'));
+  await Promise.all([
+    uploadStore.put(uploadPath, Buffer.from('new upload')),
+    outputStore.size(outputPath).then((size) => assert.equal(size, 17)),
+  ]);
+  assert.equal(await new Response(await outputStore.download(outputPath)).text(), 'original workbook');
+  await assert.rejects(uploadStore.read(outputPath), { status: 502 });
+  assert.equal(await uploadStore.size(uploadPath), 10);
 });
 
 test('keeps oversized and malformed completion records unreadable', async () => {

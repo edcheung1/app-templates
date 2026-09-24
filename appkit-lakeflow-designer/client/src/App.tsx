@@ -8,7 +8,7 @@ import remarkGfm from 'remark-gfm';
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Card } from '@databricks/appkit-ui/react';
 
 import { ActiveRunBanner } from './ActiveRunBanner';
-import { ExportDownload } from './ExportDownload';
+import { fileDownloadRoute } from '../../shared/fileOutputs';
 import type {
   AppChartSpec,
   AppConfigState,
@@ -405,17 +405,19 @@ export function App() {
   const viewFollowedResult = () => clearSelection();
   const result = state.snapshot?.result;
   const ownRunSucceeded = state.phase === 'settled' && isSuccessfulResultState(state.snapshot?.resultState);
+  const ownRunHasResult = ownRunSucceeded || (state.phase === 'settled' && hasWrittenFiles(result));
   const ownFinishedAt = state.startedAt === undefined ? undefined : state.startedAt + state.elapsedMs;
   const followedRunSucceeded = followed.settled && isSuccessfulResultState(followed.snapshot?.resultState);
+  const followedRunHasResult = followedRunSucceeded || (followed.settled && hasWrittenFiles(followed.outcome));
   const lastSuccessfulEntry = lastSuccessfulRunEntry(lastRun);
   const defaultDisplayedRun =
     state.phase === 'settled'
-      ? ownRunSucceeded && state.snapshot !== undefined
+      ? ownRunHasResult && state.snapshot !== undefined
         ? runHistoryEntryFromSnapshot(state.snapshot, state.startedAt)
         : lastSuccessfulEntry
       : state.phase === 'running'
         ? lastSuccessfulEntry
-        : followedRunSucceeded && followed.active !== undefined
+        : followedRunHasResult && followed.active !== undefined
           ? runHistoryEntry(
               followed.active.run,
               followed.active.parameters,
@@ -447,13 +449,13 @@ export function App() {
     }
   } else if (state.phase === 'running') {
     unmatchedOutputState = 'running';
-  } else if (ownRunSucceeded) {
+  } else if (ownRunHasResult) {
     displayedOutputs = outputsFrom(result);
     unmatchedOutputState = 'omitted';
   } else if (state.phase === 'settled' && lastRun.status === 'found') {
     displayedOutputs = outputsFrom(lastRun.result);
     unmatchedOutputState = 'omitted';
-  } else if (followedRunSucceeded && followed.outcome !== undefined) {
+  } else if (followedRunHasResult && followed.outcome !== undefined) {
     displayedOutputs = outputsFrom(followed.outcome);
     unmatchedOutputState = 'omitted';
   } else if (lastRun.status === 'found') {
@@ -525,11 +527,11 @@ export function App() {
           {
 
 }
-          {state.phase === 'idle' || (state.phase === 'settled' && !ownRunSucceeded)
+          {state.phase === 'idle' || (state.phase === 'settled' && !ownRunHasResult)
             ? planLandingArea({
                 lastRun: lastRun.status,
-                following: followed.following && (!followed.settled || followedRunSucceeded),
-                followedSettled: followedRunSucceeded,
+                following: followed.following && (!followed.settled || followedRunHasResult),
+                followedSettled: followedRunHasResult,
                 selectedRun: selectedEntry !== undefined,
               }).map((section) => (
                 <LandingBlock
@@ -549,7 +551,7 @@ export function App() {
               ))
             : null}
 
-          {state.phase === 'settled' && ownRunSucceeded && state.snapshot !== undefined ? (
+          {state.phase === 'settled' && ownRunHasResult && state.snapshot !== undefined ? (
             <LastRunLabel
               run={runHistoryEntryFromSnapshot(state.snapshot, state.startedAt)}
               parameters={state.snapshot.parameters ?? state.params}
@@ -558,6 +560,15 @@ export function App() {
               variant="justFinished"
               finishedAt={ownFinishedAt}
             />
+          ) : null}
+
+          {ownRunHasResult && !ownRunSucceeded ? (
+            <div className="px-6 py-4">
+              <Alert variant="destructive">
+                <AlertTitle>The run did not finish successfully</AlertTitle>
+                <AlertDescription>Completed file writes are available below. Other outputs may be missing.</AlertDescription>
+              </Alert>
+            </div>
           ) : null}
 
           {state.phase === 'running' && state.startedAt != null ? (
@@ -599,7 +610,7 @@ export function App() {
         <Card className="overflow-hidden p-0 [&>*:first-child]:border-t-0">
           <PublishedBlocks
             blocks={manifest.blocks}
-            exportRunId={manifest.exports && displayedRun?.resultState === 'SUCCESS' ? displayedRun.jobRunId : undefined}
+            downloadRunId={displayedRun?.jobRunId}
             outputs={displayedOutputs}
             unmatchedState={unmatchedOutputState}
             onRetry={run}
@@ -624,6 +635,10 @@ function activeRunOf(lastRun: LastRunState): ActiveRun | undefined {
 
 function outputsFrom(result: RunOutcome | undefined): MatchedOutput[] {
   return result?.outcome === 'outputs' ? result.outputs : [];
+}
+
+function hasWrittenFiles(result: RunOutcome | undefined): boolean {
+  return outputsFrom(result).some((output) => (output.files?.length ?? 0) > 0);
 }
 
 function runHistoryEntry(
@@ -852,13 +867,13 @@ function RunResult({
 
 function PublishedBlocks({
   blocks,
-  exportRunId,
+  downloadRunId,
   outputs,
   unmatchedState,
   onRetry,
 }: {
   blocks: AppManifestBlock[];
-  exportRunId?: string;
+  downloadRunId?: string;
   outputs: MatchedOutput[];
   unmatchedState: UnmatchedOutputState;
   onRetry: () => void;
@@ -874,7 +889,7 @@ function PublishedBlocks({
           <PublishedOutputBlock
             key={match.key}
             block={match.block}
-            exportRunId={exportRunId}
+            downloadRunId={downloadRunId}
             output={match.output}
             unmatchedState={unmatchedState}
             onRetry={onRetry}
@@ -905,13 +920,13 @@ function MarkdownBlock({ block }: { block: AppMarkdownBlock }) {
 
 function PublishedOutputBlock({
   block,
-  exportRunId,
+  downloadRunId,
   output,
   unmatchedState,
   onRetry,
 }: {
   block: AppOutputBlock;
-  exportRunId?: string;
+  downloadRunId?: string;
   output?: MatchedOutput;
   unmatchedState: UnmatchedOutputState;
   onRetry: () => void;
@@ -926,7 +941,7 @@ function PublishedOutputBlock({
   }
   return (
     <OutputSection
-      exportRequest={exportRunId ? { sourceRunId: exportRunId, outputId: block.id } : undefined}
+      downloadRequest={downloadRunId && block.fileOutput ? { runId: downloadRunId, outputId: block.id } : undefined}
       output={{
         ...output,
         title: outputTitle(block),
@@ -976,7 +991,15 @@ function OutputHeading({
   );
 }
 
-export function OutputSection({ output, onRetry, exportRequest }: { output: MatchedOutput; onRetry: () => void; exportRequest?: { sourceRunId: string; outputId: string } }) {
+export function OutputSection({
+  output,
+  onRetry,
+  downloadRequest,
+}: {
+  output: MatchedOutput;
+  onRetry: () => void;
+  downloadRequest?: { runId: string; outputId: string };
+}) {
   const { outcome } = output;
   return (
     <section className="border-border border-t [&>*]:border-t-0">
@@ -984,12 +1007,36 @@ export function OutputSection({ output, onRetry, exportRequest }: { output: Matc
       {outcome.outcome === 'result' ? (
         <ResultSection payload={outcome.payload} chartSpec={output.chartSpec} />
       ) : null}
-      {outcome.outcome === 'result' && output.chartSpec === undefined && exportRequest && (
-        <ExportDownload key={`${exportRequest.sourceRunId}:${exportRequest.outputId}`} {...exportRequest} />
+      {output.files && downloadRequest && (
+        <div className="px-6 py-4 text-sm">
+          {output.files.length > 0 ? (
+            <>
+              <ul className="space-y-2">
+                {output.files.map((file, index) => (
+                  <li key={file.path}>
+                    <a
+                      className="text-primary underline"
+                      href={fileDownloadRoute(downloadRequest.runId, downloadRequest.outputId, index)}
+                    >
+                      Download {file.path.slice(file.path.lastIndexOf('/') + 1)}
+                    </a>
+                    <div className="text-muted-foreground break-all text-xs">{file.path}</div>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-muted-foreground mt-3 text-xs">
+                Downloads the current file at the saved destination. Later runs may overwrite it.
+                Files are retained until the volume owner removes them.
+              </p>
+            </>
+          ) : (
+            <p className="text-muted-foreground">This run did not record any completed files for this output.</p>
+          )}
+        </div>
       )}
       {outcome.outcome === 'computeError' ? <ComputeError payload={outcome.payload} onRetry={onRetry} /> : null}
       {outcome.outcome === 'malformed' ? <MalformedOutput reason={outcome.reason} /> : null}
-      {outcome.outcome === 'missing' ? <MissingOutput reason={outcome.reason} /> : null}
+      {outcome.outcome === 'missing' && !output.files?.length ? <MissingOutput reason={outcome.reason} /> : null}
     </section>
   );
 }

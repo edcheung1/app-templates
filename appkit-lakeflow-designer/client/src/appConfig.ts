@@ -1,8 +1,9 @@
 import { CONFIG_ROUTE } from './routes';
 import { parseAppStorage, type AppStorage } from '../../shared/storageConfig';
 import { isFileFormats } from '../../shared/fileFormats';
+import { hasInvalidFileOutputDeclaration, parseFileOutput, type FileOutputConfig } from '../../shared/fileOutputs';
 
-export const APP_MANIFEST_VERSION = 5;
+export const APP_MANIFEST_VERSION = 6;
 
 export const TARGET_NODE_PARAM = 'target_node';
 
@@ -44,6 +45,7 @@ export type AppOutputBlock = {
   port: string;
 
   chartSpec?: AppChartSpec;
+  fileOutput?: FileOutputConfig;
 };
 
 export type AppMarkdownBlock = {
@@ -55,7 +57,6 @@ export type AppMarkdownBlock = {
 export type AppManifestBlock = AppMarkdownBlock | AppOutputBlock;
 
 export type AppManifest = {
-  exports?: boolean;
   storage?: AppStorage;
   version: number;
   appName: string;
@@ -113,8 +114,7 @@ export function parseAppManifest(raw: unknown): AppManifest | undefined {
   }
   const storage = parseAppStorage(raw.storage);
   if (
-    (raw.exports !== undefined && typeof raw.exports !== 'boolean') ||
-    (raw.exports === true && !storage) ||
+    hasInvalidFileOutputDeclaration(raw.blocks) ||
     (raw.storage !== undefined && !storage) ||
     (raw.parameters.some((entry) => isRecord(entry) && entry.type === 'file') && !storage) ||
     raw.parameters.some((entry) =>
@@ -123,7 +123,6 @@ export function parseAppManifest(raw: unknown): AppManifest | undefined {
   )
     return undefined;
   return {
-    ...(raw.exports === true ? { exports: true } : {}),
     ...(storage === undefined ? {} : { storage }),
     version: raw.version,
     appName: raw.appName,
@@ -173,6 +172,7 @@ function parseBlocks(raw: unknown): AppManifestBlock[] {
       nodeId: typeof entry.nodeId === 'string' ? entry.nodeId : '',
       port: typeof entry.port === 'string' ? entry.port : '',
       ...(chartSpec === undefined ? {} : { chartSpec }),
+      ...(parseFileOutput(entry.fileOutput) ? { fileOutput: parseFileOutput(entry.fileOutput) } : {}),
     });
   }
   return blocks;
