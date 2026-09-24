@@ -83,10 +83,6 @@ export function RunStatus({
         <dd className="text-foreground">{computingLabel}</dd>
         <dt>Started</dt>
         <dd className="tabular-nums">{startTime}</dd>
-        <dt>Expected</dt>
-        <dd>
-          35-45s. Almost all of it is compute startup, not query time, so it does not shrink with a smaller result.
-        </dd>
         {snapshot?.runPageUrl ? (
           <>
             <dt>Run</dt>
