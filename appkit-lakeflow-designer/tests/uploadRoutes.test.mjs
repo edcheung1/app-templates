@@ -351,6 +351,11 @@ test('file-only runs carry server-owned destination, revision, counts and owners
   assert.equal(submission.notebook_params.ld_display_outputs_for, 'source');
   assert.equal(submission.notebook_params._lb_app_viewer, viewerKey('alice', '100'));
   assert.match(submission.notebook_params._lb_app_revision, /^file-outputs-v1:/);
+  assert.match(submission.notebook_params._lb_output_namespace, /^[0-9a-f-]{36}$/);
+  assert.equal((await request('post', '/api/designer/run', {
+    body: { params: { _lb_output_namespace: submission.notebook_params._lb_output_namespace } },
+  })).status, 200);
+  assert.notEqual(state.submissions[1].notebook_params._lb_output_namespace, submission.notebook_params._lb_output_namespace);
   assert.equal((await request('post', '/api/designer/run', { viewer: '' })).status, 400);
   state.runs = [run(10, 'alice', submission.notebook_params)];
   assert.equal((await request('get', '/api/designer/run/:jobRunId', { viewer: 'bob', params: { jobRunId: '10' } })).status, 404);
@@ -375,20 +380,25 @@ test('last-run and terminal status include file receipts without table preview o
     blocks: [{ type: 'output', id: 'written', nodeId: 'output_0', port: 'result', fileOutput: { volumes: ['main.apps.files'] } }],
   };
   const files = [{ path: '/Volumes/main/apps/files/original.xlsx' }];
-  state.commands = [{ command: 'write_file()', results: { data: [{
-    type: 'mimeBundle', data: { 'application/vnd.databricks.lakeflow-designer.files+json': { node: 'output_0', files } },
-  }] } }];
-  state.runs = [run(20, 'bob'), run(10, 'alice')];
-  state.listed = state.runs.map(({ run_id, job_id }) => ({ run_id, job_id }));
-  const last = await request('get', '/api/designer/last-run');
-  assert.equal(last.body.status, 'found');
-  assert.equal(last.body.run.jobRunId, '10');
-  assert.equal(last.body.result.outcome, 'outputs');
-  assert.deepEqual(last.body.result.outputs[0].files, files);
-  assert.equal(last.body.result.outputs[0].outcome.outcome, 'missing');
-  state.runs[1].state.result_state = 'FAILED';
-  const partial = await request('get', '/api/designer/run/:jobRunId', { params: { jobRunId: '10' } });
-  assert.deepEqual(parseRunSnapshot(partial.body).result.outputs[0].files, files);
+  for (const behavior of ['run_artifact', 'shared_append', 'shared_workbook_update', undefined]) {
+    state.commands = [{ command: 'write_file()', results: { data: [{
+      type: 'mimeBundle', data: { 'application/vnd.databricks.lakeflow-designer.files+json': { node: 'output_0', files, behavior } },
+    }] } }];
+    state.runs = [run(20, 'bob'), run(10, 'alice')];
+    state.listed = state.runs.map(({ run_id, job_id }) => ({ run_id, job_id }));
+    const last = await request('get', '/api/designer/last-run');
+    assert.equal(last.body.status, 'found');
+    assert.equal(last.body.run.jobRunId, '10');
+    assert.equal(last.body.result.outcome, 'outputs');
+    assert.deepEqual(last.body.result.outputs[0].files, files);
+    assert.equal(last.body.result.outputs[0].fileBehavior, behavior);
+    assert.equal(last.body.result.outputs[0].outcome.outcome, 'missing');
+    state.runs[1].state.result_state = 'FAILED';
+    const partial = await request('get', '/api/designer/run/:jobRunId', { params: { jobRunId: '10' } });
+    const output = parseRunSnapshot(partial.body).result.outputs[0];
+    assert.deepEqual(output.files, files);
+    assert.equal(output.fileBehavior, behavior);
+  }
 });
 
 test('enables plugin storage on republish and binds a completed upload to a run', async () => {

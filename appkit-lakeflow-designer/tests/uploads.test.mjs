@@ -369,6 +369,32 @@ test('file-output manifest scopes are explicit without requiring upload storage'
   assert.equal((await parameters.resolveRunParameters(fileManifest, {}, undefined, memoryStore())).ok, false);
 });
 
+test('each submitted file-output run gets a fresh server-owned namespace, never a consumer value', async () => {
+  const submittedNamespace = '00000000-0000-4000-8000-000000000000';
+  const fileManifest = {
+    parameters: [{ name: '_lb_output_namespace', label: 'Reserved', type: 'text', defaultValue: submittedNamespace }],
+    blocks: [{ type: 'output', nodeId: 'output_0', fileOutput: { volumes: ['main.apps.files'] } }],
+  };
+  assert.equal(parameters.isReservedParameter('_lb_output_namespace'), true);
+  const namespaces = [];
+  for (const viewer of ['alice', 'alice', 'bob']) {
+    const resolved = await parameters.resolveRunParameters(fileManifest, {
+      _lb_output_namespace: submittedNamespace,
+    }, viewer, memoryStore());
+    assert.equal(resolved.ok, true);
+    const namespace = resolved.params._lb_output_namespace;
+    assert.match(namespace, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.notEqual(namespace, submittedNamespace);
+    namespaces.push(namespace);
+  }
+  assert.equal(new Set(namespaces).size, namespaces.length);
+  const previewOnly = await parameters.resolveRunParameters({ ...fileManifest, blocks: [] }, {
+    _lb_output_namespace: submittedNamespace,
+  }, 'alice', memoryStore());
+  assert.equal(previewOnly.ok, true);
+  assert.equal(previewOnly.params._lb_output_namespace, undefined);
+});
+
 test('malformed file-output identities cannot silently downgrade an App to preview-only behavior', () => {
   const preview = manifest.blocks[0];
   const file = { type: 'output', id: 'file', nodeId: 'output_0', port: 'result', fileOutput: { volumes: ['main.apps.files'] } };

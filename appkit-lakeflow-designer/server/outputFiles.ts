@@ -7,8 +7,9 @@ import {
   isOutputFilePath,
   MAX_OUTPUT_FILES,
   parseFileOutput,
+  parseFileOutputBehavior,
   type FileOutputConfig,
-  type WrittenFile,
+  type WrittenFiles,
 } from '../shared/fileOutputs';
 import { canAccessRun } from './fileUploads';
 import { isLegacyExportRun, manifestRevision, runParameters, type FileOutputManifest } from './runRevision';
@@ -17,11 +18,11 @@ import type { OutputFileStore } from './outputFileStore';
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-export function recordedOutputFiles(
+export function recordedFileOutput(
   payload: string | undefined,
   node: string,
   config: FileOutputConfig,
-): WrittenFile[] | undefined {
+): WrittenFiles | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(payload ?? '');
@@ -39,7 +40,8 @@ export function recordedOutputFiles(
   if (!paths.every((path): path is string => isOutputFilePath(path, config)) || new Set(paths).size !== paths.length) {
     return undefined;
   }
-  return paths.map((path) => ({ path }));
+  const behavior = parseFileOutputBehavior(receipt.behavior);
+  return { node, files: paths.map((path) => ({ path })), ...(behavior ? { behavior } : {}) };
 }
 
 interface Dependencies {
@@ -110,10 +112,10 @@ export function registerOutputFileRoutes(app: Pick<Application, 'get'>, deps: De
       if (!state.result_state && !['TERMINATED', 'SKIPPED', 'INTERNAL_ERROR'].includes(String(state.life_cycle_state))) {
         throw new DownloadError(409, 'Wait for the run to finish before downloading files.');
       }
-      const receipt = recordedOutputFiles(await deps.readPayload(String(task.run_id)), block.nodeId, block.fileOutput);
+      const receipt = recordedFileOutput(await deps.readPayload(String(task.run_id)), block.nodeId, block.fileOutput);
       const indexText = String(req.params.fileIndex);
       const index = /^(0|[1-9][0-9]*)$/.test(indexText) ? Number(indexText) : -1;
-      const file = receipt?.[index];
+      const file = receipt?.files[index];
       if (!file) throw new DownloadError(404, 'The run has no completed file at this output.');
       const store = deps.store(file.path.split('/').slice(2, 5).join('.'));
       const size = await store.size(file.path);

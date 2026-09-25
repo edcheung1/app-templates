@@ -1,5 +1,5 @@
 import { DISPLAY_ROW_LIMIT, summarizeResultPreview } from '../shared/resultPreview';
-import { FILE_OUTPUTS_MIME_TYPE, MAX_OUTPUT_FILES, type WrittenFiles } from '../shared/fileOutputs';
+import { FILE_OUTPUTS_MIME_TYPE, MAX_OUTPUT_FILES, parseFileOutputBehavior, type WrittenFiles } from '../shared/fileOutputs';
 
 const RUNNER_PAYLOAD_VERSION = 2;
 const NOTEBOOK_MODEL_ASSIGNMENT = /__DATABRICKS_NOTEBOOK_MODEL = '([^']*)'/;
@@ -160,7 +160,12 @@ export function exportedModelToRunPayload(exportedHtml: unknown): string | undef
         Array.isArray(receipt.files) && receipt.files.length <= MAX_OUTPUT_FILES &&
         receipt.files.every((file) => isRecord(file) && typeof file.path === 'string')
       ) {
-        files.push({ node: receipt.node, files: receipt.files.map((file) => ({ path: file.path as string })) });
+        const behavior = parseFileOutputBehavior(receipt.behavior);
+        files.push({
+          node: receipt.node,
+          files: receipt.files.map((file) => ({ path: file.path as string })),
+          ...(behavior ? { behavior } : {}),
+        });
       }
     }
     const rowCounts = exactRowCounts(command.results);

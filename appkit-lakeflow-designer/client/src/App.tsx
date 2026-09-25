@@ -8,7 +8,7 @@ import remarkGfm from 'remark-gfm';
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Card } from '@databricks/appkit-ui/react';
 
 import { ActiveRunBanner } from './ActiveRunBanner';
-import { fileDownloadRoute } from '../../shared/fileOutputs';
+import { fileDownloadRoute, type FileOutputBehavior } from '../../shared/fileOutputs';
 import type {
   AppChartSpec,
   AppConfigState,
@@ -991,6 +991,12 @@ function OutputHeading({
   );
 }
 
+const FILE_OUTPUT_LABELS: Record<FileOutputBehavior, string> = {
+  run_artifact: 'File generated for this run',
+  shared_append: 'Shared file · append mode',
+  shared_workbook_update: 'Shared workbook · updated',
+};
+
 export function OutputSection({
   output,
   onRetry,
@@ -1000,7 +1006,8 @@ export function OutputSection({
   onRetry: () => void;
   downloadRequest?: { runId: string; outputId: string };
 }) {
-  const { outcome } = output;
+  const { outcome, fileBehavior } = output;
+  const isSharedFile = fileBehavior === 'shared_append' || fileBehavior === 'shared_workbook_update';
   return (
     <section className="border-border border-t [&>*]:border-t-0">
       <OutputHeading title={output.title} undeclared={output.undeclared} />
@@ -1011,6 +1018,7 @@ export function OutputSection({
         <div className="px-6 py-4 text-sm">
           {output.files.length > 0 ? (
             <>
+              {fileBehavior && <p className="mb-2 font-medium">{FILE_OUTPUT_LABELS[fileBehavior]}</p>}
               <ul className="space-y-2">
                 {output.files.map((file, index) => (
                   <li key={file.path}>
@@ -1025,9 +1033,16 @@ export function OutputSection({
                 ))}
               </ul>
               <p className="text-muted-foreground mt-3 text-xs">
-                Downloads the current file at the saved destination. Later runs may overwrite it.
+                {fileBehavior === 'run_artifact'
+                  ? 'Later App runs use separate destinations. '
+                  : 'Downloads the current contents at the saved destination, including changes made after this run. '}
                 Files are retained until the volume owner removes them.
               </p>
+              {isSharedFile && outcome.outcome === 'result' && (
+                <p className="text-muted-foreground mt-2 text-xs">
+                  The preview and row count are as of the selected run and may differ from the file downloaded now.
+                </p>
+              )}
             </>
           ) : (
             <p className="text-muted-foreground">This run did not record any completed files for this output.</p>

@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import express from 'express';
 import { build } from 'tsdown';
 
-let outputDirectory, registerOutputFileRoutes, manifestRevision, recordedOutputFiles;
+let outputDirectory, registerOutputFileRoutes, manifestRevision, recordedFileOutput;
 before(async () => {
   outputDirectory = await mkdtemp(fileURLToPath(new URL('../.output-file-tests-', import.meta.url)));
   await build({
@@ -15,7 +15,7 @@ before(async () => {
     config: false, tsconfig: 'tsconfig.server.json', outDir: outputDirectory,
     outExtensions: () => ({ js: '.mjs' }), logLevel: 'silent',
   });
-  ({ registerOutputFileRoutes, recordedOutputFiles } = await import(pathToFileURL(join(outputDirectory, 'outputFiles.mjs')).href));
+  ({ registerOutputFileRoutes, recordedFileOutput } = await import(pathToFileURL(join(outputDirectory, 'outputFiles.mjs')).href));
   ({ manifestRevision } = await import(pathToFileURL(join(outputDirectory, 'runRevision.mjs')).href));
 });
 after(async () => { if (outputDirectory) await rm(outputDirectory, { recursive: true }); });
@@ -173,9 +173,31 @@ test('rejects anonymous, preview-only, invalid index and partial download reques
 test('rejects duplicate or too many files as an entire invalid receipt', () => {
   for (const files of [[{ path: '/Volumes/main/apps/files/a.csv' }, { path: '/Volumes/main/apps/files/a.csv' }],
     Array.from({ length: 51 }, (_, index) => ({ path: `/Volumes/main/apps/files/${index}.csv` }))]) {
-    assert.equal(recordedOutputFiles(JSON.stringify({ files: [{ node: 'out', files }] }), 'out', { volumes: ['main.apps.files'] }), undefined);
+    assert.equal(recordedFileOutput(JSON.stringify({ files: [{ node: 'out', files }] }), 'out', { volumes: ['main.apps.files'] }), undefined);
   }
-  assert.deepEqual(recordedOutputFiles(JSON.stringify({ files: [{ node: 'out', files: [] }] }), 'out', { volumes: ['main.apps.files'] }), []);
+  assert.deepEqual(recordedFileOutput(JSON.stringify({ files: [{ node: 'out', files: [] }] }), 'out', { volumes: ['main.apps.files'] }), { node: 'out', files: [] });
+});
+
+test('retains recorded write behavior without inferring it from the file path or current policy', () => {
+  const files = [{ path: '/Volumes/main/apps/files/_designer_apps/old-namespace/report.csv' }];
+  for (const behavior of ['run_artifact', 'shared_append', 'shared_workbook_update', undefined, 'unknown', null, {}]) {
+    const receipt = recordedFileOutput(JSON.stringify({ files: [{ node: 'out', files, behavior }] }), 'out', { volumes: ['main.apps.files'] });
+    assert.deepEqual(receipt, {
+      node: 'out', files,
+      ...(['run_artifact', 'shared_append', 'shared_workbook_update'].includes(behavior) ? { behavior } : {}),
+    });
+  }
+});
+
+test('each run downloads its recorded namespaced artifact rather than the latest output path', async (t) => {
+  const h = await harness(t);
+  const path = '/Volumes/main/apps/files/_designer_apps/submission/attempt/output_0/report.csv';
+  h.state.receipts[0] = { node: 'output_0', behavior: 'run_artifact', files: [{ path }] };
+  h.files.set(path, Buffer.from('first run\n'));
+  h.files.set('/Volumes/main/apps/files/report.csv', Buffer.from('latest shared file\n'));
+  h.files.set('/Volumes/main/apps/files/_designer_apps/new-submission/attempt/output_0/report.csv', Buffer.from('next run\n'));
+  assert.equal(await (await h.call()).text(), 'first run\n');
+  assert.deepEqual(h.state.reads, [{ volume: 'main.apps.files', path }]);
 });
 
 test('aborts incomplete transfers without deleting the source file', async (t) => {

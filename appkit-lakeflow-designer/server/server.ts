@@ -7,12 +7,13 @@ import { appKitUploadStore } from './uploadStore';
 import { registerUploadRoutes } from './uploads';
 import { isReservedParameter, resolveRunParameters } from './runParameters';
 import { isLegacyExportRun, manifestRevision } from './runRevision';
-import { registerOutputFileRoutes, recordedOutputFiles } from './outputFiles';
+import { registerOutputFileRoutes, recordedFileOutput } from './outputFiles';
 import { appKitOutputFileStore } from './outputFileStore';
 import {
   APP_REVISION_PARAM,
   hasInvalidFileOutputDeclaration,
   parseFileOutput,
+  type FileOutputBehavior,
   type FileOutputConfig,
 } from '../shared/fileOutputs';
 import { isFileFormats } from '../shared/fileFormats';
@@ -476,6 +477,7 @@ type OutputSection = {
   source?: string;
   chartSpec?: Record<string, unknown>;
   files?: { path: string }[];
+  fileBehavior?: FileOutputBehavior;
   undeclared: boolean;
   outcome: MatchOutcome;
 };
@@ -519,6 +521,7 @@ function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
     // reported missing.
     const found = classified.find((entry) => !consumed.has(entry.index) && matches(entry)) ?? classified.find(matches);
     const source = joinSource(declaredNode, declaredPort);
+    const fileReceipt = output.fileOutput ? recordedFileOutput(raw, output.nodeId, output.fileOutput) : undefined;
     const section = {
       key: `declared:${output.id}`,
       id: output.id,
@@ -526,7 +529,8 @@ function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
       ...(source === undefined ? {} : { source }),
 
       ...(output.chartSpec === undefined ? {} : { chartSpec: output.chartSpec }),
-      ...(output.fileOutput ? { files: recordedOutputFiles(raw, output.nodeId, output.fileOutput) ?? [] } : {}),
+      ...(output.fileOutput ? { files: fileReceipt?.files ?? [] } : {}),
+      ...(fileReceipt?.behavior ? { fileBehavior: fileReceipt.behavior } : {}),
       undeclared: false,
     };
     if (found === undefined) {

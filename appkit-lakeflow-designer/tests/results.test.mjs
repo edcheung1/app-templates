@@ -102,6 +102,19 @@ test('a singleton file MIME receipt remains available when no preview was produc
   assert.deepEqual(parsed.outputs, []);
 });
 
+test('file MIME receipts retain their effective behavior and ignore unrecognized metadata', () => {
+  for (const behavior of ['run_artifact', 'shared_append', 'shared_workbook_update', undefined, 'overwrite', null, {}]) {
+    const receipt = { node: 'output_0', files: [{ path: '/Volumes/main/apps/files/report.csv' }], behavior };
+    const parsed = JSON.parse(exportedModelToRunPayload(notebookHtml([{
+      command: 'write_file()', results: { type: 'mimeBundle', data: { [FILES_MIME_TYPE]: receipt } },
+    }])));
+    assert.deepEqual(parsed.files, [{
+      node: receipt.node, files: receipt.files,
+      ...(['run_artifact', 'shared_append', 'shared_workbook_update'].includes(behavior) ? { behavior } : {}),
+    }]);
+  }
+});
+
 test('malformed file receipts do not discard valid sibling receipts or table counts', () => {
   const invalid = ['not JSON', {}, { node: 'output', files: [{}] },
     { node: 'output', files: Array.from({ length: 51 }, () => ({ path: '/Volumes/a/b/c/data.csv' })) }];
@@ -128,7 +141,7 @@ function footer(payload) {
   return renderToStaticMarkup(createElement(ResultFooter, { payload }));
 }
 
-function outputSection(payload, chartSpec, files) {
+function outputSection(payload, chartSpec, files, fileBehavior) {
   return renderToStaticMarkup(createElement(OutputSection, {
     output: {
       key: 'output',
@@ -136,6 +149,7 @@ function outputSection(payload, chartSpec, files) {
       undeclared: false,
       chartSpec,
       files,
+      fileBehavior,
       outcome: { outcome: 'result', payload },
     },
     onRetry: () => {},
@@ -176,11 +190,56 @@ test('the initial last-run response retains native file downloads without previe
       }));
       assert.match(html, /Download data.xlsx/);
       assert.match(html, /\/api\/designer\/run\/42\/files\/output\/0\/download/);
-      assert.match(html, /Later runs may overwrite it/);
+      assert.match(html, /including changes made after this run/);
+      assert.doesNotMatch(html, /File generated for this run/);
       assert.doesNotMatch(html, /No preview/);
     }
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('historical file labels use the recorded behavior and preserve full row counts', () => {
+  const payload = { ...parsePayload(outputFromTable(displayTable(2, true))), total_row_count: 5000 };
+  const files = [{ path: '/Volumes/main/apps/files/report.csv' }];
+  for (const [fileBehavior, label] of [
+    ['run_artifact', 'File generated for this run'],
+    ['shared_append', 'Shared file · append mode'],
+    ['shared_workbook_update', 'Shared workbook · updated'],
+  ]) {
+    const parsed = parseRunOutcome({ outcome: 'outputs', outputs: [{
+      key: 'output', title: 'Historical output', files, fileBehavior,
+      outcome: { outcome: 'result', payload },
+    }] });
+    const output = parsed.outputs[0];
+    assert.equal(output.fileBehavior, fileBehavior);
+    assert.equal(output.outcome.payload.total_row_count, 5000);
+    const html = outputSection(output.outcome.payload, undefined, output.files, output.fileBehavior);
+    assert.ok(html.includes(label));
+    assert.match(html, /2 \/ 5,000 rows/);
+    assert.match(html, /Download report.csv/);
+    if (fileBehavior === 'run_artifact') {
+      assert.match(html, /Later App runs use separate destinations/);
+      assert.doesNotMatch(html, /including changes made after this run|may differ from the file downloaded now/);
+    } else {
+      assert.match(html, /including changes made after this run/);
+      assert.match(html, /row count are as of the selected run and may differ from the file downloaded now/);
+    }
+  }
+});
+
+test('legacy or unknown file behavior stays conservative even for a namespaced-looking path', () => {
+  const payload = parsePayload(outputFromTable(displayTable(2, false)));
+  const files = [{ path: '/Volumes/main/apps/files/_designer_apps/namespace/attempt/node/report.csv' }];
+  for (const fileBehavior of [undefined, 'overwrite', 'RUN_ARTIFACT', null, {}]) {
+    const parsed = parseRunOutcome({ outcome: 'outputs', outputs: [{
+      key: 'output', title: 'Legacy output', files, fileBehavior,
+      outcome: { outcome: 'result', payload },
+    }] });
+    assert.equal(parsed.outputs[0].fileBehavior, undefined);
+    const html = outputSection(payload, undefined, files, parsed.outputs[0].fileBehavior);
+    assert.match(html, /including changes made after this run/);
+    assert.doesNotMatch(html, /File generated for this run|Shared file · append mode|Shared workbook · updated/);
   }
 });
 

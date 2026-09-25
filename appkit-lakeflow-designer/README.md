@@ -188,19 +188,30 @@ Each selected file Output has an explicit volume allowlist in the trusted Worksp
 ```
 
 Consumers may parameterize directories, filenames and destinations within those approved volumes.
-The runner resolves and validates actual destination paths before writing. The App server passes
-`_lb_file_outputs` as a server-owned node-to-policy map, plus viewer ownership and execution revision.
+The runner resolves parameters and validates actual destination paths when the run executes. The App
+server passes `_lb_file_outputs` as a server-owned node-to-policy map, plus viewer ownership and execution revision.
 Neither browser parameters nor recorded metadata can add an unapproved destination.
 Publishing grants the App service principal read access to the selected output volumes. The Job's
 run-as identity independently needs permission to write there; App resource bindings do not grant
 the publisher extra permissions. Running the App has write side effects with that identity.
 Approval covers the **entire volume**, not a directory prefix. Only recorded Output artifacts are
-downloadable through the App, but consumers may target existing files anywhere in an approved volume.
+downloadable through the App, but shared append/workbook destinations may target existing files anywhere in an approved volume.
 Use dedicated volumes for isolation. Append and Excel range/sheet writes can preserve prior file
 contents; downloading the resulting file exposes those prior rows or other sheets as well.
 
+Ordinary overwrite Outputs generate a separate file for each execution beneath
+`<configured directory>/_designer_apps/<submission namespace>/<attempt>/<node>/<filename>`.
+The App server generates a fresh reserved `_lb_output_namespace` UUID for every submitted run with
+file outputs; the Python runtime adds an attempt UUID and node ID. Consumer parameters cannot supply
+the namespace. Direct runs of the published Job mint a runtime namespace when the server parameter
+is absent. Filename/directory parameters are evaluated first, and split filenames retain their
+native suffixes within that run's directory. Later App runs do not overwrite these artifacts.
+Append Outputs keep their configured destination. Excel range updates also keep the configured
+workbook, even when the operator's write mode is overwrite, because they preserve its other contents.
+
 After a successful write, the Python runtime emits a structured MIME receipt
-(`application/vnd.databricks.lakeflow-designer.files+json`) naming the exact written files.
+(`application/vnd.databricks.lakeflow-designer.files+json`) naming the exact written files and recording
+the effective behavior: `run_artifact`, `shared_append`, or `shared_workbook_update`.
 These receipts are read separately from previews/counts so files remain available if a later preview
 or sibling branch fails. Split outputs offer individual links, up to 50 files; there is no ZIP or
 second format conversion. An empty split result has no downloadable files. Excel downloads contain
@@ -217,15 +228,20 @@ No storage credentials or presigned URLs reach the browser. No new Job, SQL ware
 staging volume, export cache, or deletion is involved. Upload storage is not required for file-only Apps.
 Completed and interrupted downloads retain the original file for repeated and concurrent downloads.
 
-Downloads read the **current contents of the recorded destination**, not a per-run snapshot.
-Overwrites by another viewer, App, Job or external writer can change what an older run downloads. Use unique directories or
-filenames for run isolation; shared destinations need deliberate concurrency and overwrite policy.
+The historical UI labels run-generated files separately from shared append/workbook destinations
+using that run's receipt, never the current manifest. Older receipts without behavior metadata remain
+conservative: they do not claim run isolation. Downloads always read the recorded path; external
+writes or deletion can still change a run-generated artifact. Shared destinations return their
+**current contents**, including changes after the selected run. They need deliberate concurrency and
+overwrite policy; append mode does not provide atomicity or retry deduplication.
 Receipt availability follows Jobs output retention. A missing/deleted file produces a readable error.
 Native writer size and format limits apply; downloads do not silently truncate or reserialize files.
 
 Full row counts remain enabled by `_lb_collect_row_counts` and `ld_display_outputs_for`, using the
 same shared Python helper and structured count results as before. Visualizations hide the count label.
 File receipts are emitted before result readback/counting and do not consume a preview-table ordinal.
+Shared-file outputs explain that previews/counts are as of the selected run, not necessarily the
+current downloaded file. The count is the operator's result count, not a count of rows newly appended.
 
 There is no automatic TTL, cleanup Job, or consumer DELETE endpoint. Volume owners manage retention.
 Upgrading removes the generic export endpoints but does not delete previously staged exports, cache

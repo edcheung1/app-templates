@@ -1,4 +1,5 @@
 export const FILE_OUTPUTS_PARAM = '_lb_file_outputs';
+export const OUTPUT_NAMESPACE_PARAM = '_lb_output_namespace';
 export const APP_REVISION_PARAM = '_lb_app_revision';
 export const FILE_OUTPUTS_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.files+json';
 export const MAX_OUTPUT_FILES = 50;
@@ -9,9 +10,19 @@ export interface FileOutputConfig {
 export interface WrittenFile {
   path: string;
 }
+export type FileOutputBehavior = 'run_artifact' | 'shared_append' | 'shared_workbook_update';
+
+export function parseFileOutputBehavior(value: unknown): FileOutputBehavior | undefined {
+  return value === 'run_artifact' || value === 'shared_append' || value === 'shared_workbook_update'
+    ? value
+    : undefined;
+}
+
 export interface WrittenFiles {
   node: string;
   files: WrittenFile[];
+  // Older receipts omit this; never infer run isolation from a path or the current manifest.
+  behavior?: FileOutputBehavior;
 }
 
 export function parseFileOutput(value: unknown): FileOutputConfig | undefined {

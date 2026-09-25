@@ -1,6 +1,6 @@
 import { DISPLAY_ROW_LIMIT, summarizeResultPreview, type ResultPreview } from '../../shared/resultPreview';
 import type { AppChartSpec } from './appConfig';
-import { MAX_OUTPUT_FILES, type WrittenFile } from '../../shared/fileOutputs';
+import { MAX_OUTPUT_FILES, parseFileOutputBehavior, type FileOutputBehavior, type WrittenFile } from '../../shared/fileOutputs';
 
 export type SchemaField = {
   name: string;
@@ -54,6 +54,7 @@ export type MatchedOutput = {
 
   chartSpec?: AppChartSpec;
   files?: WrittenFile[];
+  fileBehavior?: FileOutputBehavior;
 
   undeclared: boolean;
   outcome: OutputOutcome;
@@ -196,6 +197,7 @@ function parseMatchedOutput(raw: unknown, index: number): MatchedOutput | undefi
     return undefined;
   }
   const id = nonEmptyString(raw.id);
+  const fileBehavior = parseFileOutputBehavior(raw.fileBehavior);
   return {
     key: nonEmptyString(raw.key) ?? `output:${index}`,
     ...(id === undefined ? {} : { id }),
@@ -206,6 +208,7 @@ function parseMatchedOutput(raw: unknown, index: number): MatchedOutput | undefi
       raw.files.every((file) => isRecord(file) && typeof file.path === 'string' && file.path.startsWith('/Volumes/'))
       ? { files: raw.files.map((file) => ({ path: file.path as string })) }
       : {}),
+    ...(fileBehavior ? { fileBehavior } : {}),
     undeclared: raw.undeclared === true,
     outcome,
   };

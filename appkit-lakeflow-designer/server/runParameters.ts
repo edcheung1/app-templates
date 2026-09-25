@@ -1,7 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import type { AppStorage } from '../shared/storageConfig';
 import { APP_VIEWER_PARAM, UploadError, resolveUpload, type UploadStore } from './fileUploads';
 import { validateFileFormat } from '../shared/fileFormats';
-import { FILE_OUTPUTS_PARAM, type FileOutputConfig } from '../shared/fileOutputs';
+import { FILE_OUTPUTS_PARAM, OUTPUT_NAMESPACE_PARAM, type FileOutputConfig } from '../shared/fileOutputs';
 
 export function isReservedParameter(name: string): boolean {
   return name === 'target_node' || name === 'ld_display_outputs' || name === 'ld_display_outputs_for' || name.startsWith('_lb_');
@@ -87,6 +88,9 @@ export async function resolveRunParameters(
   // An empty override is intentional: a partially completed republish may leave newer
   // file-writing Job defaults behind the current manifest. Never inherit that policy.
   params[FILE_OUTPUTS_PARAM] = JSON.stringify(fileOutputs);
+  // The runtime adds an attempt ID and node ID beneath this server-owned submission namespace.
+  // Consumer parameters must not choose/reuse a previous run's artifact directory.
+  if (Object.keys(fileOutputs).length > 0) params[OUTPUT_NAMESPACE_PARAM] = randomUUID();
   if (privateApp && viewer) params[APP_VIEWER_PARAM] = viewer;
   return { ok: true, params };
 }
