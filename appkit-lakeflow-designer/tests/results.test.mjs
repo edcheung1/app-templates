@@ -11,6 +11,9 @@ let exportedModelToRunPayload;
 let parseRunOutcome;
 let fetchLastRun;
 let lastSuccessfulRunEntry;
+let planRunDisplay;
+let RunFailureAlert;
+let shouldRetainSettledFollowedRun;
 let ResultFooter;
 let ResultGrid;
 let OutputSection;
@@ -29,6 +32,7 @@ before(async () => {
       ResultGrid: 'client/src/ResultGrid.tsx',
       App: 'client/src/App.tsx',
       lastRun: 'client/src/lastRun.ts',
+      landingPlan: 'client/src/landingPlan.ts',
     },
     config: false,
     tsconfig: 'tsconfig.client.json',
@@ -42,8 +46,9 @@ before(async () => {
   ({ parseRunOutcome } = await import(pathToFileURL(join(outputDirectory, 'payload.mjs')).href));
   ({ ResultFooter } = await import(pathToFileURL(join(outputDirectory, 'ResultFooter.mjs')).href));
   ({ ResultGrid } = await import(pathToFileURL(join(outputDirectory, 'ResultGrid.mjs')).href));
-  ({ OutputSection, lastSuccessfulRunEntry } = await import(pathToFileURL(join(outputDirectory, 'App.mjs')).href));
+  ({ OutputSection, lastSuccessfulRunEntry, planRunDisplay, RunFailureAlert } = await import(pathToFileURL(join(outputDirectory, 'App.mjs')).href));
   ({ fetchLastRun } = await import(pathToFileURL(join(outputDirectory, 'lastRun.mjs')).href));
+  ({ shouldRetainSettledFollowedRun } = await import(pathToFileURL(join(outputDirectory, 'landingPlan.mjs')).href));
 });
 
 after(async () => {
@@ -197,6 +202,77 @@ test('the initial last-run response retains native file downloads without previe
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('a newly failed run stays selected and never shows the previous successful outputs', () => {
+  const priorOutput = { id: 'prior', title: 'Old result' };
+  const lastRun = {
+    status: 'found', run: { jobRunId: '41', resultState: 'SUCCESS' },
+    result: { outcome: 'outputs', outputs: [priorOutput] },
+  };
+  const noFollowedRun = { following: false, settled: false };
+  const idle = planRunDisplay({ phase: 'idle', elapsedMs: 0, cancelling: false }, noFollowedRun, lastRun);
+  assert.equal(idle.displayedRun.jobRunId, '41');
+  assert.deepEqual(idle.outputs, [priorOutput]);
+
+  const running = planRunDisplay({ phase: 'running', elapsedMs: 1000, cancelling: false }, noFollowedRun, lastRun);
+  assert.equal(running.unmatchedState, 'running');
+  assert.deepEqual(running.outputs, []);
+
+  const snapshot = {
+    jobRunId: '42', terminal: true, resultState: 'FAILED', stateMessage: 'The Output writer failed.',
+    runPageUrl: 'https://example.com/jobs/1/runs/42',
+    result: { outcome: 'noPayload', reason: 'The run produced no output.' },
+  };
+  const failed = planRunDisplay(
+    { phase: 'settled', snapshot, startedAt: 1000, elapsedMs: 2000, cancelling: false },
+    noFollowedRun, lastRun,
+  );
+  assert.equal(failed.displayedRun.jobRunId, '42');
+  assert.equal(failed.displayedRun.resultState, 'FAILED');
+  assert.equal(failed.displayedRun.runPageUrl, snapshot.runPageUrl);
+  assert.equal(failed.unmatchedState, 'omitted');
+  assert.deepEqual(failed.outputs, []);
+  const alert = renderToStaticMarkup(createElement(RunFailureAlert, { snapshot, outcome: snapshot.result }));
+  assert.match(alert, /The run did not finish successfully/);
+  assert.match(alert, /The Output writer failed\./);
+});
+
+test('a followed run that fails also displaces the previous successful result', () => {
+  const lastRun = {
+    status: 'found', run: { jobRunId: '41', resultState: 'SUCCESS' },
+    result: { outcome: 'outputs', outputs: [{ id: 'prior' }] },
+  };
+  const snapshot = { jobRunId: '42', terminal: true, resultState: 'FAILED', stateMessage: 'Compute failed' };
+  const followed = {
+    following: true, settled: true, active: { run: { jobRunId: '42' } },
+    snapshot, outcome: { outcome: 'noPayload', reason: 'Compute failed' },
+  };
+  const displayed = planRunDisplay({ phase: 'idle', elapsedMs: 0, cancelling: false }, followed, lastRun);
+  assert.equal(displayed.displayedRun.jobRunId, '42');
+  assert.deepEqual(displayed.outputs, []);
+  assert.equal(displayed.unmatchedState, 'omitted');
+  assert.equal(shouldRetainSettledFollowedRun(undefined, '42', 'idle'), true);
+  assert.equal(shouldRetainSettledFollowedRun('43', '42', 'idle'), false);
+  assert.equal(shouldRetainSettledFollowedRun(undefined, '42', 'running'), false);
+});
+
+test('a failed run still exposes files it finished writing', () => {
+  const fileOutput = { id: 'writer', files: [{ path: '/Volumes/main/apps/files/report.xlsx' }] };
+  const snapshot = {
+    jobRunId: '42', terminal: true, resultState: 'FAILED', stateMessage: 'A later operator failed',
+    result: { outcome: 'outputs', outputs: [fileOutput] },
+  };
+  const displayed = planRunDisplay(
+    { phase: 'settled', snapshot, elapsedMs: 2000, cancelling: false },
+    { following: false, settled: false },
+    { status: 'none' },
+  );
+  assert.equal(displayed.displayedRun.jobRunId, '42');
+  assert.deepEqual(displayed.outputs, [fileOutput]);
+  const alert = renderToStaticMarkup(createElement(RunFailureAlert, { snapshot, outcome: snapshot.result }));
+  assert.match(alert, /A later operator failed/);
+  assert.match(alert, /Completed file writes are available below/);
 });
 
 test('historical file labels use the recorded behavior and preserve full row counts', () => {

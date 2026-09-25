@@ -43,7 +43,9 @@ import { ResultGrid } from './ResultGrid';
 import { ComputeError, EmptyResult, MalformedOutput, MissingOutput, NoPayload } from './ResultStates';
 import { RunStatus } from './RunStatus';
 import { ThemeToggle } from './ThemeToggle';
+import type { RunState } from './useDesignerRun';
 import { useDesignerRun } from './useDesignerRun';
+import type { FollowedRunState } from './useFollowedRun';
 import { useFollowedRun } from './useFollowedRun';
 import type { MatchedOutput, OkPayload, RunOutcome, RunSnapshot } from './payload';
 
@@ -405,28 +407,14 @@ export function App() {
   const viewFollowedResult = () => clearSelection();
   const result = state.snapshot?.result;
   const ownRunSucceeded = state.phase === 'settled' && isSuccessfulResultState(state.snapshot?.resultState);
-  const ownRunHasResult = ownRunSucceeded || (state.phase === 'settled' && hasWrittenFiles(result));
   const ownFinishedAt = state.startedAt === undefined ? undefined : state.startedAt + state.elapsedMs;
-  const followedRunSucceeded = followed.settled && isSuccessfulResultState(followed.snapshot?.resultState);
-  const followedRunHasResult = followedRunSucceeded || (followed.settled && hasWrittenFiles(followed.outcome));
-  const lastSuccessfulEntry = lastSuccessfulRunEntry(lastRun);
-  const defaultDisplayedRun =
-    state.phase === 'settled'
-      ? ownRunHasResult && state.snapshot !== undefined
-        ? runHistoryEntryFromSnapshot(state.snapshot, state.startedAt)
-        : lastSuccessfulEntry
-      : state.phase === 'running'
-        ? lastSuccessfulEntry
-        : followedRunHasResult && followed.active !== undefined
-          ? runHistoryEntry(
-              followed.active.run,
-              followed.active.parameters,
-              followed.active.parameterDisplayValues,
-              followed.snapshot?.resultState,
-              followed.snapshot?.lifeCycleState,
-            )
-          : lastSuccessfulEntry;
-  const displayedRun = selectedEntry ?? defaultDisplayedRun;
+  const { displayedRun, outputs: displayedOutputs, unmatchedState: unmatchedOutputState } = planRunDisplay(
+    state,
+    followed,
+    lastRun,
+    selectedEntry,
+    selectedRun,
+  );
   const newerRunDidNotSucceed =
     selectedEntry === undefined &&
     lastRun.status === 'found' &&
@@ -434,41 +422,6 @@ export function App() {
     hasNewerUnsuccessfulRun(history.runs, lastRun.run.endTime);
   const historyState: RunHistoryState =
     !runnable && notRunnableReason === 'noJob' ? { status: 'noJob' } : history;
-  let displayedOutputs: MatchedOutput[] = [];
-  let unmatchedOutputState: UnmatchedOutputState = 'beforeRun';
-
-  if (selectedEntry !== undefined) {
-    // A run is explicitly selected: show only its outputs, never fall back to the last/followed run
-    // (which would render a different run's data under the selected-run header). While it loads show
-    // a loading placeholder; if it is unavailable the selected-run section above surfaces the error.
-    if (selectedRun?.status === 'found') {
-      displayedOutputs = outputsFrom(selectedRun.outcome);
-      unmatchedOutputState = 'omitted';
-    } else {
-      unmatchedOutputState = selectedRun?.status === 'unavailable' ? 'omitted' : 'loading';
-    }
-  } else if (state.phase === 'running') {
-    unmatchedOutputState = 'running';
-  } else if (ownRunHasResult) {
-    displayedOutputs = outputsFrom(result);
-    unmatchedOutputState = 'omitted';
-  } else if (state.phase === 'settled' && lastRun.status === 'found') {
-    displayedOutputs = outputsFrom(lastRun.result);
-    unmatchedOutputState = 'omitted';
-  } else if (followedRunHasResult && followed.outcome !== undefined) {
-    displayedOutputs = outputsFrom(followed.outcome);
-    unmatchedOutputState = 'omitted';
-  } else if (lastRun.status === 'found') {
-    displayedOutputs = outputsFrom(lastRun.result);
-    unmatchedOutputState = 'omitted';
-  } else if (followed.following && !followed.settled) {
-    unmatchedOutputState = 'running';
-  } else if (followed.following && followed.settled) {
-    // The followed run has finished without a result we can show (it failed or returned no
-    // payload); surface that instead of leaving the outputs on the 'still running' placeholder.
-    displayedOutputs = outputsFrom(followed.outcome);
-    unmatchedOutputState = 'omitted';
-  }
 
   return (
     <Shell>
@@ -527,11 +480,11 @@ export function App() {
           {
 
 }
-          {state.phase === 'idle' || (state.phase === 'settled' && !ownRunHasResult)
+          {state.phase === 'idle' || (state.phase === 'settled' && state.snapshot === undefined)
             ? planLandingArea({
                 lastRun: lastRun.status,
-                following: followed.following && (!followed.settled || followedRunHasResult),
-                followedSettled: followedRunHasResult,
+                following: followed.following,
+                followedSettled: followed.settled,
                 selectedRun: selectedEntry !== undefined,
               }).map((section) => (
                 <LandingBlock
@@ -540,6 +493,7 @@ export function App() {
                   lastRun={lastRun}
                   followedActive={followed.active}
                   followedOutcome={followed.outcome}
+                  followedSnapshot={followed.snapshot}
                   followedFinishedAt={followed.finishedAt}
                   selectedEntry={selectedEntry}
                   selectedRun={selectedRun}
@@ -551,7 +505,7 @@ export function App() {
               ))
             : null}
 
-          {state.phase === 'settled' && ownRunHasResult && state.snapshot !== undefined ? (
+          {state.phase === 'settled' && state.snapshot !== undefined ? (
             <LastRunLabel
               run={runHistoryEntryFromSnapshot(state.snapshot, state.startedAt)}
               parameters={state.snapshot.parameters ?? state.params}
@@ -562,13 +516,8 @@ export function App() {
             />
           ) : null}
 
-          {ownRunHasResult && !ownRunSucceeded ? (
-            <div className="px-6 py-4">
-              <Alert variant="destructive">
-                <AlertTitle>The run did not finish successfully</AlertTitle>
-                <AlertDescription>Completed file writes are available below. Other outputs may be missing.</AlertDescription>
-              </Alert>
-            </div>
+          {state.phase === 'settled' && state.snapshot !== undefined && !ownRunSucceeded ? (
+            <RunFailureAlert snapshot={state.snapshot} outcome={result} />
           ) : null}
 
           {state.phase === 'running' && state.startedAt != null ? (
@@ -663,6 +612,70 @@ export function lastSuccessfulRunEntry(lastRun: LastRunState): RunHistoryEntry |
     : undefined;
 }
 
+export function planRunDisplay(
+  state: RunState,
+  followed: FollowedRunState,
+  lastRun: LastRunState,
+  selectedEntry?: RunHistoryEntry,
+  selectedRun?: SelectedRunState,
+): { displayedRun?: RunHistoryEntry; outputs: MatchedOutput[]; unmatchedState: UnmatchedOutputState } {
+  if (selectedEntry !== undefined) {
+    // Explicit history selection always wins, including while its result is loading or unavailable.
+    return {
+      displayedRun: selectedEntry,
+      outputs: selectedRun?.status === 'found' ? outputsFrom(selectedRun.outcome) : [],
+      unmatchedState: selectedRun?.status === 'found' || selectedRun?.status === 'unavailable' ? 'omitted' : 'loading',
+    };
+  }
+  const lastSuccessful = lastSuccessfulRunEntry(lastRun);
+  if (state.phase === 'running') {
+    return { displayedRun: lastSuccessful, outputs: [], unmatchedState: 'running' };
+  }
+  if (state.phase === 'settled' && state.snapshot !== undefined) {
+    return {
+      displayedRun: runHistoryEntryFromSnapshot(state.snapshot, state.startedAt),
+      outputs: outputsFrom(state.snapshot.result),
+      unmatchedState: 'omitted',
+    };
+  }
+  if (followed.following && followed.settled && followed.active !== undefined) {
+    return {
+      displayedRun: runHistoryEntry(
+        followed.active.run,
+        followed.active.parameters,
+        followed.active.parameterDisplayValues,
+        followed.snapshot?.resultState,
+        followed.snapshot?.lifeCycleState,
+      ),
+      outputs: outputsFrom(followed.outcome),
+      unmatchedState: 'omitted',
+    };
+  }
+  if (lastRun.status === 'found') {
+    return { displayedRun: lastSuccessful, outputs: outputsFrom(lastRun.result), unmatchedState: 'omitted' };
+  }
+  return { outputs: [], unmatchedState: followed.following ? 'running' : 'beforeRun' };
+}
+
+export function RunFailureAlert({ snapshot, outcome }: { snapshot: RunSnapshot; outcome?: RunOutcome }) {
+  const reason = snapshot.stateMessage?.trim() ||
+    (outcome?.outcome === 'noPayload' ? outcome.reason : undefined) ||
+    `The run ended in state ${snapshot.resultState ?? snapshot.lifeCycleState ?? 'UNKNOWN'}.`;
+  return (
+    <div className="border-border border-t px-6 py-4">
+      <Alert variant="destructive">
+        <AlertTitle>The run did not finish successfully</AlertTitle>
+        <AlertDescription>
+          <p className="whitespace-pre-wrap break-words">{reason}</p>
+          {hasWrittenFiles(outcome) ? (
+            <p className="mt-2">Completed file writes are available below. Other outputs may be missing.</p>
+          ) : null}
+        </AlertDescription>
+      </Alert>
+    </div>
+  );
+}
+
 function runHistoryEntryFromSnapshot(snapshot: RunSnapshot, startedAt: number | undefined): RunHistoryEntry {
   return {
     jobRunId: snapshot.jobRunId,
@@ -691,6 +704,7 @@ function LandingBlock({
   lastRun,
   followedActive,
   followedOutcome,
+  followedSnapshot,
   followedFinishedAt,
   selectedEntry,
   selectedRun,
@@ -703,6 +717,7 @@ function LandingBlock({
   lastRun: LastRunState;
   followedActive?: ActiveRun;
   followedOutcome?: RunOutcome;
+  followedSnapshot?: RunSnapshot;
   followedFinishedAt?: number;
   selectedEntry?: RunHistoryEntry;
   selectedRun?: SelectedRunState;
@@ -723,6 +738,7 @@ function LandingBlock({
         parameters={followedActive.parameters}
         parameterDisplayValues={followedActive.parameterDisplayValues}
         result={followedOutcome}
+        snapshot={followedSnapshot}
         declared={declared}
         variant="justFinished"
         finishedAt={followedFinishedAt}
@@ -824,6 +840,7 @@ function SelectedRunSection({
       parameters={selectedEntry.parameters}
       parameterDisplayValues={selectedEntry.parameterDisplayValues}
       result={selectedRun.outcome}
+      snapshot={selectedRun.snapshot}
       declared={declared}
       variant="historical"
     />
@@ -835,6 +852,7 @@ function RunResult({
   parameters,
   parameterDisplayValues,
   result,
+  snapshot,
   declared,
   variant,
   finishedAt,
@@ -844,6 +862,7 @@ function RunResult({
   parameters?: Record<string, string>;
   parameterDisplayValues?: Record<string, string>;
   result: RunOutcome;
+  snapshot?: RunSnapshot;
   declared: AppParameter[];
   variant: LastRunVariant;
   finishedAt?: number;
@@ -860,7 +879,11 @@ function RunResult({
         finishedAt={finishedAt}
         newerRunDidNotSucceed={newerRunDidNotSucceed}
       />
-      {result.outcome === 'noPayload' ? <NoPayload reason={result.reason} runPageUrl={run.runPageUrl} /> : null}
+      {snapshot?.terminal && !isSuccessfulResultState(snapshot.resultState) ? (
+        <RunFailureAlert snapshot={snapshot} outcome={result} />
+      ) : result.outcome === 'noPayload' ? (
+        <NoPayload reason={result.reason} runPageUrl={run.runPageUrl} />
+      ) : null}
     </>
   );
 }

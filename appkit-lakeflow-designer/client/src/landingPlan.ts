@@ -66,6 +66,16 @@ export function shouldFollowActiveRun({ activeRunId, consumerRunPhase, followedS
   return !followedSettled && consumerRunPhase === 'idle';
 }
 
+export function shouldRetainSettledFollowedRun(
+  activeRunId: string | undefined,
+  settledRunId: string | undefined,
+  consumerRunPhase: ConsumerRunPhase,
+): boolean {
+  // /last-run no longer reports this run as active after it terminates.
+  return consumerRunPhase === 'idle' && settledRunId !== undefined &&
+    (activeRunId === undefined || activeRunId === settledRunId);
+}
+
 export function activeRunStageLabel(lifeCycleState: string | undefined): string {
   switch (lifeCycleState) {
     case 'QUEUED':
@@ -99,8 +109,8 @@ export const FOLLOWED_RUN_ATTRIBUTION =
   'This run finished while you were watching. It may have been started by someone else, so the values it used are shown below.';
 
 export const FOLLOWED_RESULT_AVAILABLE_OFFER =
-  'A run of this app finished while you were looking at an earlier one. Its result is ready: opening it ' +
-  'will replace the run shown below.';
+  'A run of this app finished while you were looking at an earlier one. Open it to see its outcome; ' +
+  'this will replace the run shown below.';
 
 export const FOLLOWED_RUN_NO_OUTCOME_REASON =
   'The run finished but reported no output, so its result could not be read.';

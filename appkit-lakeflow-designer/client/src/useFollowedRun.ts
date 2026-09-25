@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import type { ActiveRun } from './lastRun';
 import type { ConsumerRunPhase } from './landingPlan';
-import { FOLLOWED_RUN_NO_OUTCOME_REASON, shouldFollowActiveRun } from './landingPlan';
+import { FOLLOWED_RUN_NO_OUTCOME_REASON, shouldFollowActiveRun, shouldRetainSettledFollowedRun } from './landingPlan';
 import type { RunOutcome, RunSnapshot } from './payload';
 import { runStatusRoute } from './routes';
 import { POLL_INTERVAL_MS } from './useDesignerRun';
@@ -41,7 +41,8 @@ export function useFollowedRun(active: ActiveRun | undefined, consumerRunPhase: 
       // Nothing eligible to follow. Keep a result we followed THIS run to completion so it stays on
       // screen; otherwise the followed run is gone (or following is disabled), so drop stale
       // following/active/snapshot state instead of leaving the old banner or result up.
-      const keepSettled = activeRunId !== undefined && settledRunId.current === activeRunId;
+      // Keep the terminal snapshot until another run takes its place or the page is reloaded.
+      const keepSettled = shouldRetainSettledFollowedRun(activeRunId, settledRunId.current, consumerRunPhase);
       if (!keepSettled) {
         setState((prev) => (prev === IDLE ? prev : IDLE));
       }
