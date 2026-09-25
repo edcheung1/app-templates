@@ -478,7 +478,6 @@ type OutputSection = {
   chartSpec?: Record<string, unknown>;
   files?: { path: string }[];
   fileBehavior?: FileOutputBehavior;
-  undeclared: boolean;
   outcome: MatchOutcome;
 };
 
@@ -495,12 +494,8 @@ function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
   }
   const classified = multi.outcome === 'outputs' ? multi.outputs : [];
   const consumed = new Set<number>();
-  // A node that has a published output block exposes only the port(s) the author selected. Its other
-  // ports still arrive in the run payload (the runner displays every port of a displayed node), but
-  // they are deliberate omissions, not undeclared discoveries, so they must not render as extra
-  // sections. A node with no published block at all is still surfaced as undeclared below.
-  const declaredNodes = new Set(declared.map((output) => output.nodeId).filter((nodeId) => nodeId !== ''));
 
+  // The run may include other nodes and ports, but only published output blocks are exposed.
   const outputs: OutputSection[] = declared.map((output) => {
     // Each payload entry is keyed by the (node, port) from the cell's display(ctx[...]) line rather
     // than an output id, so bind the manifest output by that.
@@ -509,8 +504,7 @@ function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
     // Well-formed entries bind by (node, port); outputStringField normalizes '' to undefined, so
     // coerce declared empties the same way (else an empty port compares undefined === '' and never
     // binds). A malformed entry carries no (node, port), so bind it to its declared block by id: the
-    // block then surfaces the malformed outcome instead of reporting missing and re-appending it as
-    // undeclared.
+    // block then surfaces the malformed outcome instead of reporting missing.
     const matches = (entry: ClassifiedEntry) =>
       entry.outcome === 'malformed'
         ? entry.id !== undefined && entry.id === output.id
@@ -531,7 +525,6 @@ function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
       ...(output.chartSpec === undefined ? {} : { chartSpec: output.chartSpec }),
       ...(output.fileOutput ? { files: fileReceipt?.files ?? [] } : {}),
       ...(fileReceipt?.behavior ? { fileBehavior: fileReceipt.behavior } : {}),
-      undeclared: false,
     };
     if (found === undefined) {
       return {
@@ -545,28 +538,6 @@ function matchRunOutputs(declared: OutputBlock[], raw: string | undefined) {
     consumed.add(found.index);
     return { ...section, outcome: matchedOutcome(found) };
   });
-
-  for (const entry of classified) {
-    if (consumed.has(entry.index)) {
-      continue;
-    }
-    const node = entry.outcome === 'malformed' ? undefined : outputStringField(entry.payload, 'target_node');
-    // Drop a sibling port of a node the author did publish: its selected port already matched a
-    // declared block above, and its other ports are intentional omissions rather than undeclared output.
-    if (node !== undefined && declaredNodes.has(node)) {
-      continue;
-    }
-    const source =
-      entry.outcome === 'malformed' ? undefined : joinSource(node, outputStringField(entry.payload, 'target_port'));
-    outputs.push({
-      key: `payload:${entry.index}`,
-      ...(entry.id === undefined ? {} : { id: entry.id }),
-      title: entry.id ?? node ?? `Output ${entry.index + 1}`,
-      ...(source === undefined ? {} : { source }),
-      undeclared: true,
-      outcome: matchedOutcome(entry),
-    });
-  }
 
   return { outcome: 'outputs', outputs };
 }

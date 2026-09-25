@@ -284,6 +284,28 @@ test('live status preserves ordinary parameters and leaves missing recorded valu
   assert.equal(snapshot.parameterDisplayValues, undefined);
 });
 
+test('run APIs return only outputs selected in the published manifest', async () => {
+  const { state, request } = await serverHarness();
+  state.runs = [run(10, 'alice')];
+  state.listed = [{ run_id: 10, job_id: 100 }];
+  const table = { type: 'table', schema: [{ name: 'value', type: 'long' }], data: [[1]], overflow: false };
+  state.commands = [
+    { command: 'display(ctx["source.data"])', results: table },
+    { command: 'display(ctx["source.metadata"])', results: table },
+    { command: 'display(ctx["other.data"])', results: table },
+  ];
+
+  for (const response of [
+    await request('get', '/api/designer/run/:jobRunId', { params: { jobRunId: '10' } }),
+    await request('get', '/api/designer/last-run'),
+  ]) {
+    assert.equal(response.status, 200);
+    assert.equal(response.body.result.outcome, 'outputs');
+    assert.deepEqual(response.body.result.outputs.map((output) => output.id), ['data']);
+    assert.equal(response.body.result.outputs[0].outcome.outcome, 'result');
+  }
+});
+
 test('rejects unsupported manifest versions and malformed optional storage', async () => {
   const { state, request } = await serverHarness();
   for (const invalid of [

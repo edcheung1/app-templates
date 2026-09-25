@@ -248,7 +248,7 @@ export function matchPublishedBlocks(
 ): PublishedBlockMatch[] {
   const outputsById = new Map<string, MatchedOutput>();
   for (const output of outputs) {
-    if (!output.undeclared && output.id !== undefined && !outputsById.has(output.id)) {
+    if (output.id !== undefined && !outputsById.has(output.id)) {
       outputsById.set(output.id, output);
     }
   }
@@ -888,7 +888,7 @@ function RunResult({
   );
 }
 
-function PublishedBlocks({
+export function PublishedBlocks({
   blocks,
   downloadRunId,
   outputs,
@@ -902,7 +902,6 @@ function PublishedBlocks({
   onRetry: () => void;
 }) {
   const matchedBlocks = matchPublishedBlocks(blocks, outputs);
-  const undeclaredOutputs = outputs.filter((output) => output.undeclared);
   return (
     <>
       {matchedBlocks.map((match) =>
@@ -919,9 +918,6 @@ function PublishedBlocks({
           />
         ),
       )}
-      {undeclaredOutputs.map((output) => (
-        <OutputSection key={output.key} output={output} onRetry={onRetry} />
-      ))}
     </>
   );
 }
@@ -957,7 +953,7 @@ function PublishedOutputBlock({
   if (output === undefined) {
     return (
       <section className="border-border border-t [&>*]:border-t-0">
-        <OutputHeading title={outputTitle(block)} undeclared={false} />
+        <OutputHeading title={outputTitle(block)} />
         <UnmatchedOutput state={unmatchedState} />
       </section>
     );
@@ -969,7 +965,6 @@ function PublishedOutputBlock({
         ...output,
         title: outputTitle(block),
         ...(block.chartSpec === undefined ? { chartSpec: undefined } : { chartSpec: block.chartSpec }),
-        undeclared: false,
       }}
       onRetry={onRetry}
     />
@@ -995,21 +990,10 @@ function outputTitle(block: AppOutputBlock): string {
   return block.label !== '' ? block.label : block.nodeId !== '' ? block.nodeId : block.id;
 }
 
-function OutputHeading({
-  title,
-  undeclared,
-}: {
-  title: string;
-  undeclared: boolean;
-}) {
+function OutputHeading({ title }: { title: string }) {
   return (
     <div className="border-border flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t px-6 pt-5 pb-1">
       <h2 className="text-sm font-medium">{title}</h2>
-      {undeclared ? (
-        <span className="text-muted-foreground text-xs">
-          Returned by the run but not among this app&apos;s published outputs. It may need republishing.
-        </span>
-      ) : null}
     </div>
   );
 }
@@ -1033,7 +1017,7 @@ export function OutputSection({
   const isSharedFile = fileBehavior === 'shared_append' || fileBehavior === 'shared_workbook_update';
   return (
     <section className="border-border border-t [&>*]:border-t-0">
-      <OutputHeading title={output.title} undeclared={output.undeclared} />
+      <OutputHeading title={output.title} />
       {outcome.outcome === 'result' ? (
         <ResultSection payload={outcome.payload} chartSpec={output.chartSpec} />
       ) : null}

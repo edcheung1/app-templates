@@ -17,6 +17,7 @@ let shouldRetainSettledFollowedRun;
 let ResultFooter;
 let ResultGrid;
 let OutputSection;
+let PublishedBlocks;
 let outputDirectory;
 const ROW_COUNTS_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.row-counts+json';
 const FILES_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.files+json';
@@ -46,7 +47,7 @@ before(async () => {
   ({ parseRunOutcome } = await import(pathToFileURL(join(outputDirectory, 'payload.mjs')).href));
   ({ ResultFooter } = await import(pathToFileURL(join(outputDirectory, 'ResultFooter.mjs')).href));
   ({ ResultGrid } = await import(pathToFileURL(join(outputDirectory, 'ResultGrid.mjs')).href));
-  ({ OutputSection, lastSuccessfulRunEntry, planRunDisplay, RunFailureAlert } = await import(pathToFileURL(join(outputDirectory, 'App.mjs')).href));
+  ({ OutputSection, PublishedBlocks, lastSuccessfulRunEntry, planRunDisplay, RunFailureAlert } = await import(pathToFileURL(join(outputDirectory, 'App.mjs')).href));
   ({ fetchLastRun } = await import(pathToFileURL(join(outputDirectory, 'lastRun.mjs')).href));
   ({ shouldRetainSettledFollowedRun } = await import(pathToFileURL(join(outputDirectory, 'landingPlan.mjs')).href));
 });
@@ -151,7 +152,6 @@ function outputSection(payload, chartSpec, files, fileBehavior) {
     output: {
       key: 'output',
       title: 'Published output',
-      undeclared: false,
       chartSpec,
       files,
       fileBehavior,
@@ -161,6 +161,20 @@ function outputSection(payload, chartSpec, files, fileBehavior) {
     downloadRequest: files ? { runId: '42', outputId: 'output' } : undefined,
   }));
 }
+
+test('published blocks never render outputs outside the manifest', () => {
+  const html = renderToStaticMarkup(createElement(PublishedBlocks, {
+    blocks: [{ type: 'output', id: 'data', label: 'Published data', nodeId: 'source', port: 'data' }],
+    outputs: [
+      { key: 'declared:data', id: 'data', title: 'Published data', outcome: { outcome: 'missing', reason: 'No preview' } },
+      { key: 'payload:1', id: 'extra', title: 'Unpublished result', outcome: { outcome: 'missing', reason: 'No preview' } },
+    ],
+    unmatchedState: 'omitted',
+    onRetry: () => {},
+  }));
+  assert.match(html, /Published data/);
+  assert.doesNotMatch(html, /Unpublished result|Returned by the run/);
+});
 
 test('tabular previews retain full row counts without generic export controls', () => {
   const payload = parsePayload(outputFromTable(displayTable(2, false)));

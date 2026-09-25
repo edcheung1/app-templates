@@ -56,7 +56,6 @@ export type MatchedOutput = {
   files?: WrittenFile[];
   fileBehavior?: FileOutputBehavior;
 
-  undeclared: boolean;
   outcome: OutputOutcome;
 };
 
@@ -209,7 +208,6 @@ function parseMatchedOutput(raw: unknown, index: number): MatchedOutput | undefi
       ? { files: raw.files.map((file) => ({ path: file.path as string })) }
       : {}),
     ...(fileBehavior ? { fileBehavior } : {}),
-    undeclared: raw.undeclared === true,
     outcome,
   };
 }
