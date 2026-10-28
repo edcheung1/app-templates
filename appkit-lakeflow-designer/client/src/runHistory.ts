@@ -1,7 +1,14 @@
+import {
+  errorMessage,
+  idString,
+  isRecord,
+  nonEmptyString,
+  positiveInt,
+  stringValues,
+} from '@databricks/appkit/beta/designer';
 import type { RunOutcome, RunSnapshot } from './payload';
 import { parseRunSnapshot } from './payload';
 import { runHistoryRoute, runStatusRoute } from './routes';
-import { errorMessage, idString, isRecord, nonEmptyString, positiveInt, stringValues } from '../../shared/values';
 
 export type RunHistoryEntry = {
   jobRunId: string;

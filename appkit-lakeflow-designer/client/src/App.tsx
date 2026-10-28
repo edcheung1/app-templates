@@ -2,16 +2,18 @@ import type { SetStateAction } from 'react';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, AlertDescription, AlertTitle, Badge, Button, Card } from '@databricks/appkit-ui/react';
 
-import { ActiveRunBanner } from './ActiveRunBanner';
-import type { FileOutputBehavior } from '../../shared/fileOutputs';
-import { GuardrailSummary } from './GuardrailSummary';
 import {
+  type FileOutputBehavior,
   outputBlockTitle,
   type AppChartSpec,
   type AppManifestBlock,
   type AppOutputBlock,
   type AppParameter,
-} from '../../shared/appManifest';
+  UPLOAD_REFERENCE,
+  APP_UPDATING_MESSAGE,
+} from '@databricks/appkit/beta/designer';
+import { ActiveRunBanner } from './ActiveRunBanner';
+import { GuardrailSummary } from './GuardrailSummary';
 import {
   fetchAppConfig,
   initialValuesFor,
@@ -20,7 +22,6 @@ import {
   type AppConfigState,
   type NotRunnableReason,
 } from './appConfig';
-import { UPLOAD_REFERENCE } from '../../shared/storageConfig';
 import { MarkdownBlock } from './MarkdownBlock';
 import { OutputFileDownloads } from './OutputFileDownloads';
 import type { PublishedChartRefusal } from './chartTranslation';
@@ -48,7 +49,6 @@ import { ResultFooter } from './ResultFooter';
 import { ResultGrid } from './ResultGrid';
 import { ComputeError, EmptyResult, MalformedOutput, MissingOutput, NoPayload } from './ResultStates';
 import { RunStatus } from './RunStatus';
-import { APP_UPDATING_MESSAGE } from '../../shared/publishedRunner';
 import { ThemeToggle } from './ThemeToggle';
 import { useDesignerRun } from './useDesignerRun';
 import { useFollowedRun } from './useFollowedRun';

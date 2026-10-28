@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../client/src/App';
-import { isRecord } from '../../shared/values';
+import { isRecord } from '@databricks/appkit/beta/designer';
 
 const element = document.getElementById('app');
 if (!element) throw new Error('Missing App mount point.');

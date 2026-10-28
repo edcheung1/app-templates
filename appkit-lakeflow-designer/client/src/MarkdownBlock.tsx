@@ -1,3 +1,4 @@
+import type { AppMarkdownBlock } from '@databricks/appkit/beta/designer';
 import type { LiHTMLAttributes } from 'react';
 import type { Root } from 'hast';
 import type { Components, Options } from 'react-markdown';
@@ -6,7 +7,6 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
-import type { AppMarkdownBlock } from '../../shared/appManifest';
 
 const remarkPlugins = [remarkGfm];
 

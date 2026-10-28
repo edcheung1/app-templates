@@ -1,6 +1,6 @@
 import { Badge } from '@databricks/appkit-ui/react';
 
-import type { AppParameter } from '../../shared/appManifest';
+import type { AppParameter } from '@databricks/appkit/beta/designer';
 import type { ActiveRun } from './lastRun';
 import { ACTIVE_RUN_ATTRIBUTION, activeRunStageLabel } from './landingPlan';
 import { RunParameterList } from './LastRunLabel';

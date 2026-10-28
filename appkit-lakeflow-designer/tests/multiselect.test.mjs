@@ -6,7 +6,7 @@ import {
   isValidMultiselectValue,
   parseMultiselectValue,
   toggleMultiselectValue,
-} from '../shared/multiselect.ts';
+} from '@databricks/appkit/beta/designer';
 
 test('parses empty selections and preserves selection order and whitespace', () => {
   assert.deepEqual(parseMultiselectValue(''), []);

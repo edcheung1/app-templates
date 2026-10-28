@@ -1,5 +1,5 @@
+import type { GuardrailDiagnostic } from '@databricks/appkit/beta/designer';
 import { Alert, AlertDescription, AlertTitle, Badge } from '@databricks/appkit-ui/react';
-import type { GuardrailDiagnostic } from '../../shared/guardrails';
 
 export interface GuardrailSummaryProps {
   diagnostics?: GuardrailDiagnostic[];

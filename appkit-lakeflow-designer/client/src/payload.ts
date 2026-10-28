@@ -1,14 +1,21 @@
-import { isHtmlOutput } from '../../shared/htmlOutputs';
-import { DISPLAY_ROW_LIMIT, summarizeResultPreview, type ResultPreview } from '../../shared/resultPreview';
-import type { AppChartSpec } from '../../shared/appManifest';
 import {
+  isHtmlOutput,
+  DISPLAY_ROW_LIMIT,
+  summarizeResultPreview,
+  type ResultPreview,
+  type AppChartSpec,
   MAX_OUTPUT_FILES,
   parseFileOutputBehavior,
   type FileOutputBehavior,
   type WrittenFile,
-} from '../../shared/fileOutputs';
-import { idString, isRecord, nonEmptyString, positiveInt, stringValues } from '../../shared/values';
-import { parseRunDiagnostics, type RunDiagnostics } from '../../shared/guardrails';
+  idString,
+  isRecord,
+  nonEmptyString,
+  positiveInt,
+  stringValues,
+  parseRunDiagnostics,
+  type RunDiagnostics,
+} from '@databricks/appkit/beta/designer';
 
 export type SchemaField = {
   name: string;

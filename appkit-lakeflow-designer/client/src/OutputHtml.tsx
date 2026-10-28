@@ -1,8 +1,8 @@
 import { type SyntheticEvent, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { isRecord } from '@databricks/appkit/beta/designer';
 import { HTML_OUTPUT_WRAPPER_CSP, HTML_OUTPUT_WRAPPER_DOCUMENT, htmlOutputDocument } from './htmlSandbox';
-import { isRecord } from '../../shared/values';
 
 export interface OutputHtmlProps {
   html: string;

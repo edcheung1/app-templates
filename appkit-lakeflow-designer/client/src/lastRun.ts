@@ -1,7 +1,7 @@
+import { errorMessage, idString, isRecord, positiveInt, stringValues } from '@databricks/appkit/beta/designer';
 import type { RunOutcome } from './payload';
 import { parseRunOutcome } from './payload';
 import { LAST_RUN_ROUTE } from './routes';
-import { errorMessage, idString, isRecord, positiveInt, stringValues } from '../../shared/values';
 
 export type LastRunSummary = {
   jobRunId: string;

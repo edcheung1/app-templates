@@ -1,3 +1,4 @@
+import { fileDownloadRoute, type WrittenFile } from '@databricks/appkit/beta/designer';
 import { useState } from 'react';
 import {
   Button,
@@ -11,8 +12,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@databricks/appkit-ui/react';
-
-import { fileDownloadRoute, type WrittenFile } from '../../shared/fileOutputs';
 
 const filenameFor = (file: WrittenFile) => file.path.slice(file.path.lastIndexOf('/') + 1);
 

@@ -7,8 +7,6 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'tsdown';
 
-let exportedModelToRunPayload;
-let matchRunOutputs;
 let parseRunOutcome;
 let parseAppManifest;
 let fetchLastRun;
@@ -22,17 +20,12 @@ let ResultGrid;
 let OutputSection;
 let PublishedBlocks;
 let outputDirectory;
-const ROW_COUNTS_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.row-counts+json';
-const FILES_MIME_TYPE = 'application/vnd.databricks.lakeflow-designer.files+json';
-const NODE_STATE_MIME_TYPE = 'application/vnd.databricks.lakebuilder.runtime-node-state+json';
 
 before(async () => {
   // Keep React and AppKit resolvable from the generated modules without copying dependencies.
   outputDirectory = await mkdtemp(fileURLToPath(new URL('../.result-tests-', import.meta.url)));
   await build({
     entry: {
-      exportedRunOutput: 'server/exportedRunOutput.ts',
-      runOutputs: 'server/runOutputs.ts',
       payload: 'client/src/payload.ts',
       appConfig: 'client/src/appConfig.ts',
       ResultFooter: 'client/src/ResultFooter.tsx',
@@ -51,8 +44,6 @@ before(async () => {
     outExtensions: () => ({ js: '.mjs' }),
     logLevel: 'silent',
   });
-  ({ exportedModelToRunPayload } = await import(pathToFileURL(join(outputDirectory, 'exportedRunOutput.mjs')).href));
-  ({ matchRunOutputs } = await import(pathToFileURL(join(outputDirectory, 'runOutputs.mjs')).href));
   ({ parseRunOutcome } = await import(pathToFileURL(join(outputDirectory, 'payload.mjs')).href));
   ({ parseAppManifest } = await import(pathToFileURL(join(outputDirectory, 'appConfig.mjs')).href));
   ({ ResultFooter } = await import(pathToFileURL(join(outputDirectory, 'ResultFooter.mjs')).href));
@@ -72,34 +63,34 @@ after(async () => {
   if (outputDirectory !== undefined) await rm(outputDirectory, { recursive: true });
 });
 
-function displayTable(rowCount, overflow) {
-  return {
-    type: 'table',
-    schema: [{ name: 'value', type: '"long"', nullable: true }],
-    data: Array.from({ length: rowCount }, (_, i) => [i]),
-    ...(overflow === undefined ? {} : { overflow }),
-  };
+function parsePayload(payload) {
+  const result = parseRunOutcome({
+    outcome: 'outputs',
+    outputs: [{ id: 'output', title: 'Output', outcome: { outcome: 'result', payload } }],
+  });
+  assert.equal(result.outcome, 'outputs');
+  assert.equal(result.outputs[0].outcome.outcome, 'result');
+  return result.outputs[0].outcome.payload;
 }
 
-function rowCounts(node, counts) {
-  return { type: 'mimeBundle', data: { [ROW_COUNTS_MIME_TYPE]: { node, counts } } };
+function footer(payload) {
+  return renderToStaticMarkup(createElement(ResultFooter, { payload }));
 }
 
-function notebookHtml(commands) {
-  const model = Buffer.from(encodeURIComponent(JSON.stringify({ commands }))).toString('base64');
-  return `<script>__DATABRICKS_NOTEBOOK_MODEL = '${model}'</script>`;
-}
-
-function nodeState(nodeId, disabled) {
-  return { type: 'mimeBundle', data: { [NODE_STATE_MIME_TYPE]: { nodeId, disabled } } };
-}
-
-function matchedRunOutputs(blocks, commands) {
-  return parseRunOutcome(
-    matchRunOutputs(
-      blocks.filter((block) => block.type === 'output'),
-      exportedModelToRunPayload(notebookHtml(commands))
-    )
+function outputSection(payload, chartSpec, files, fileBehavior) {
+  return renderToStaticMarkup(
+    createElement(OutputSection, {
+      output: {
+        key: 'output',
+        title: 'Published output',
+        chartSpec,
+        files,
+        fileBehavior,
+        outcome: { outcome: 'result', payload },
+      },
+      onRetry: () => {},
+      downloadRequest: files ? { runId: '42', outputId: 'output' } : undefined,
+    })
   );
 }
 
@@ -115,151 +106,103 @@ function publishedBlocksHtml(blocks, outputs, unmatchedState = 'omitted') {
   );
 }
 
-function guardrailCommand(nodeId, name, text, extra = {}) {
+const ENVIRONMENT_BLOCKS = [
+  { type: 'output', id: 'prod', label: 'Prod Output', nodeId: 'prod', port: 'data' },
+  { type: 'output', id: 'dev', label: 'Dev Output', nodeId: 'dev', port: 'data' },
+];
+
+const HTML_BLOCK = { type: 'output', id: 'page', nodeId: 'html_1', kind: 'html', label: 'Report' };
+
+// API-shaped input keeps rendering tests independent of notebook export decoding.
+function preview(rowCount, truncated) {
   return {
-    command: `"""\nid: ${nodeId}\ntemplate: guardrails\ntemplateVersion: 2.0.0\nname: ${name}\n"""\nrun(config, inputs, spark)`,
-    results: { type: 'ansi', data: text },
-    ...extra,
+    status: 'ok',
+    target_node: 'source',
+    target_port: 'data',
+    schema: [{ name: 'value', type: 'long', nullable: true }],
+    rows: Array.from({ length: rowCount }, (_, value) => ({ value })),
+    truncated,
   };
 }
 
-const warningText = '[guardrails] WARNING: checks[0] (not_null): column "id" has 3 null values';
+for (const environment of ['prod', 'dev']) {
+  test(`renders only the ${environment} branch from the plugin response`, () => {
+    const result = parseRunOutcome({
+      outcome: 'outputs',
+      outputs: ENVIRONMENT_BLOCKS.map((block) => ({
+        key: `declared:${block.id}`,
+        id: block.id,
+        title: block.label,
+        disabled: block.id !== environment,
+        outcome: { outcome: 'result', payload: preview(1, false) },
+      })),
+    });
+    const html = publishedBlocksHtml(ENVIRONMENT_BLOCKS, result.outputs);
+    assert.match(html, environment === 'prod' ? /Prod Output/ : /Dev Output/);
+    assert.doesNotMatch(html, environment === 'prod' ? /Dev Output/ : /Prod Output/);
+    assert.match(html, /<table/);
+  });
+}
 
-test('upstream Guardrails warnings appear without a Guardrails output block', () => {
-  const blocks = [{ type: 'output', id: 'report', label: 'Report', nodeId: 'report', port: 'data' }];
-  const result = matchedRunOutputs(blocks, [
-    guardrailCommand('validate', "'Customer''s checks'", `\u001b[33m${warningText}\u001b[0m`),
-    { command: 'display(ctx["report.data"])', results: displayTable(1, false) },
-  ]);
-  assert.equal(result.outputs[0].outcome.outcome, 'result');
-  assert.deepEqual(result.diagnostics, [
-    {
-      nodeId: 'validate',
-      operatorName: "Customer's checks",
-      checkIndex: 0,
-      checkType: 'not_null',
-      severity: 'warning',
-      message: 'column "id" has 3 null values',
+for (const outcome of [
+  {
+    outcome: 'result',
+    payload: {
+      status: 'ok',
+      target_node: 'source',
+      target_port: 'data',
+      schema: [{ name: 'value', type: 'long' }],
+      rows: [],
+      truncated: false,
     },
-  ]);
-  const html = renderToStaticMarkup(createElement(GuardrailSummary, result));
-  assert.match(html, /Guardrails warnings/);
-  assert.match(html, /Customer&#x27;s checks/);
-  assert.match(html, /Check 1 \(not_null\)/);
-  assert.match(html, /3 null values/);
-});
+  },
+  { outcome: 'html', html: '<h1>Report</h1>' },
+  { outcome: 'missing', reason: 'No preview' },
+  {
+    outcome: 'computeError',
+    payload: { status: 'error', target_node: 'source', error: { type: 'InputError', message: 'Input unavailable' } },
+  },
+]) {
+  test(`recorded disablement hides the whole ${outcome.outcome} output`, () => {
+    const block =
+      outcome.outcome === 'html'
+        ? { ...HTML_BLOCK, id: 'prod', label: 'Prod Output' }
+        : { ...ENVIRONMENT_BLOCKS[0], fileOutput: { volumes: ['main.apps.files'] } };
+    const output = {
+      key: 'declared:prod',
+      id: 'prod',
+      title: block.label,
+      files: [{ path: '/Volumes/main/apps/files/report.csv' }],
+      outcome,
+    };
+    for (const disabled of [false, undefined, 'true']) {
+      const result = parseRunOutcome({ outcome: 'outputs', outputs: [{ ...output, disabled }] });
+      const html = publishedBlocksHtml([block], result.outputs);
+      assert.match(html, /Prod Output/);
+      assert.match(html, outcome.outcome === 'html' ? /<iframe/ : /Download report.csv/);
+    }
+    const disabled = parseRunOutcome({ outcome: 'outputs', outputs: [{ ...output, disabled: true }] });
+    assert.equal(publishedBlocksHtml([block], disabled.outputs), '');
+  });
+}
 
-test('Stop traceback survives absent stdout, deduplicates, and retains earlier warnings with no payload', () => {
-  const failure = '[guardrails] checks[2] (unique): repeated IDs';
-  const payload = exportedModelToRunPayload(
-    notebookHtml([
-      guardrailCommand('early', 'Early checks', warningText),
-      guardrailCommand('stop', 'Stop checks', '', {
-        results: null,
-        errorTrace: `ValueError: ${failure}`,
-        errorSummaryHtml: `<div>${failure}</div>`,
-      }),
-    ]),
-    [`ValueError: ${failure}`, failure]
-  );
-  const result = parseRunOutcome(matchRunOutputs([], payload));
-  assert.equal(result.outcome, 'noPayload');
-  assert.deepEqual(
-    result.diagnostics.map(({ nodeId, checkIndex, severity, message }) => ({ nodeId, checkIndex, severity, message })),
-    [
-      { nodeId: 'early', checkIndex: 0, severity: 'warning', message: 'column "id" has 3 null values' },
-      { nodeId: 'stop', checkIndex: 2, severity: 'failure', message: 'repeated IDs' },
-    ]
-  );
-  const html = renderToStaticMarkup(createElement(GuardrailSummary, result));
-  assert.match(html, /Guardrails failures/);
-  assert.match(html, /Warning/);
-  assert.match(html, /Failure/);
-});
-
-test('shared upstream diagnostics deduplicate per operator/check and FAILURE wins', () => {
-  const result = matchedRunOutputs(
-    [],
-    [
-      guardrailCommand('a', 'Checks A', warningText, {
-        results: {
-          data: [
-            { type: 'ansi', data: warningText },
-            { type: 'ansi', data: warningText.replace('WARNING', 'FAILURE') },
-          ],
-        },
-      }),
-      guardrailCommand('a', 'Checks A', warningText),
-      guardrailCommand('b', 'Checks B', warningText),
-    ]
-  );
-  assert.deepEqual(
-    result.diagnostics.map(({ nodeId, severity }) => ({ nodeId, severity })),
-    [
-      { nodeId: 'a', severity: 'failure' },
-      { nodeId: 'b', severity: 'warning' },
-    ]
-  );
-});
-
-test('multiline YAML names and HTML stop summaries preserve each check and comparison text', () => {
-  const result = matchedRunOutputs(
-    [],
-    [
-      guardrailCommand('validate', '|-\n  Validate\n  customers', '', {
-        errorSummaryHtml:
-          '<div>[guardrails] checks[0] (range): value &lt; 0<br>[guardrails] checks[1] (unique): duplicate &quot;id&quot;</div>',
-      }),
-    ]
-  );
-  assert.deepEqual(
-    result.diagnostics.map(({ operatorName, message }) => ({ operatorName, message })),
-    [
-      { operatorName: 'Validate\ncustomers', message: 'value < 0' },
-      { operatorName: 'Validate\ncustomers', message: 'duplicate "id"' },
-    ]
-  );
-});
-
-test('unrelated stdout, source code, malformed annotations and passing checks produce no diagnostics', () => {
-  const commands = [
-    { command: `print(${JSON.stringify(warningText)})`, results: { type: 'ansi', data: warningText } },
-    { command: '"""\nid: other\ntemplate: filter\nname: Filter\n"""', results: { type: 'ansi', data: warningText } },
-    guardrailCommand('passing', 'Passing', '[guardrails] all checks passed'),
-    guardrailCommand('invalid', '[bad yaml', warningText),
-    { command: '"""\njust a scalar\n"""', results: { type: 'ansi', data: warningText } },
-  ];
-  const result = matchedRunOutputs([], commands);
-  assert.equal(result.diagnostics, undefined);
-  assert.equal(renderToStaticMarkup(createElement(GuardrailSummary, result)), '');
-});
-
-test('task error fallback preserves available checks without inventing an operator name', () => {
-  const payload = exportedModelToRunPayload(undefined, ['ValueError: [guardrails] checks[1] (range): too large']);
-  const result = parseRunOutcome(matchRunOutputs([], payload));
-  assert.deepEqual(result.diagnostics, [
-    {
-      operatorName: 'Guardrails',
-      checkIndex: 1,
-      checkType: 'range',
-      severity: 'failure',
-      message: 'too large',
-    },
-  ]);
-});
-
-test('a task fallback does not relabel an earlier warning when a later Stop check has the same message', () => {
-  const payload = exportedModelToRunPayload(notebookHtml([guardrailCommand('early', 'Early warnings', warningText)]), [
-    'ValueError: [guardrails] checks[0] (not_null): column "id" has 3 null values',
-  ]);
-  const result = parseRunOutcome(matchRunOutputs([], payload));
-  assert.deepEqual(
-    result.diagnostics.map(({ operatorName, severity }) => ({ operatorName, severity })),
-    [
-      { operatorName: 'Early warnings', severity: 'warning' },
-      { operatorName: 'Guardrails', severity: 'failure' },
-    ]
-  );
+test('renders HTML from the plugin response in the sandbox wrapper', () => {
+  const result = parseRunOutcome({
+    outcome: 'outputs',
+    outputs: [
+      {
+        key: 'declared:page',
+        id: 'page',
+        title: 'Report',
+        outcome: { outcome: 'html', html: '<h1>Sales report</h1>' },
+      },
+    ],
+  });
+  assert.equal(result.outputs[0].outcome.outcome, 'html');
+  const html = renderToStaticMarkup(createElement(OutputSection, { output: result.outputs[0], onRetry() {} }));
+  assert.match(html, /title="Report"/);
+  assert.match(html, /frame-src &#x27;none&#x27;/);
+  assert.doesNotMatch(html, /Sales report|allow-same-origin/);
 });
 
 test('diagnostic text is escaped and invalid diagnostic fields do not discard valid results', () => {
@@ -286,42 +229,6 @@ test('diagnostic text is escaped and invalid diagnostic fields do not discard va
   assert.doesNotMatch(html, /<script|<img/);
 });
 
-test('Guardrails diagnostics follow displayed history, retained results, followed runs and terminal failures', () => {
-  const diagnostics = matchedRunOutputs([], [guardrailCommand('validate', 'Validate', warningText)]).diagnostics;
-  const lastRun = {
-    status: 'found',
-    run: { jobRunId: '41', resultState: 'SUCCESS' },
-    result: { outcome: 'outputs', outputs: [], diagnostics },
-  };
-  const idle = { phase: 'idle', elapsedMs: 0, cancelling: false };
-  const notFollowing = { following: false, settled: false };
-  assert.deepEqual(planRunDisplay(idle, notFollowing, lastRun).diagnostics, diagnostics);
-  const selected = { jobRunId: '17' };
-  assert.equal(planRunDisplay(idle, notFollowing, lastRun, selected, { status: 'loading' }).diagnostics, undefined);
-  const historical = { outcome: 'noPayload', reason: 'No tables', diagnostics };
-  const retained = planRunDisplay(idle, notFollowing, { status: 'none' }, selected, {
-    status: 'found',
-    outcome: historical,
-  });
-  const running = planRunDisplay({ ...idle, phase: 'running' }, notFollowing, lastRun, undefined, undefined, retained);
-  assert.equal(running.displayedRun.jobRunId, '17');
-  assert.deepEqual(running.diagnostics, diagnostics);
-  const cleanSnapshot = {
-    jobRunId: '42',
-    terminal: true,
-    resultState: 'FAILED',
-    result: { outcome: 'noPayload', reason: 'A different failure' },
-  };
-  assert.equal(
-    planRunDisplay({ ...idle, phase: 'settled', snapshot: cleanSnapshot }, notFollowing, lastRun).diagnostics,
-    undefined
-  );
-  const followed = { following: true, settled: true, active: { run: { jobRunId: '43' } }, outcome: historical };
-  const followedPlan = planRunDisplay(idle, followed, lastRun);
-  assert.equal(followedPlan.displayedRun.jobRunId, '43');
-  assert.deepEqual(followedPlan.diagnostics, diagnostics);
-});
-
 test('failed run displays the actual task error ahead of the generic Job status', () => {
   const html = renderToStaticMarkup(
     createElement(RunFailureAlert, {
@@ -342,246 +249,6 @@ test('failed run displays the actual task error ahead of the generic Job status'
   assert.doesNotMatch(html, /Task compute_operator failed/);
 });
 
-test('runtime states do not shift table ports, row counts, or file receipts', () => {
-  const files = { node: 'writer', files: [{ path: '/Volumes/main/apps/files/report.csv' }] };
-  const html = notebookHtml([
-    {
-      command: 'display(ctx["source.data"])\ndisplay(ctx["source.summary"])',
-      results: {
-        data: [
-          nodeState('source', false),
-          displayTable(2, true),
-          {
-            type: 'mimeBundle',
-            data: { [NODE_STATE_MIME_TYPE]: JSON.stringify({ nodeId: 'writer', disabled: true }) },
-          },
-          { type: 'mimeBundle', data: { [FILES_MIME_TYPE]: files } },
-          displayTable(1, false),
-          rowCounts('source', { data: 4000, summary: 1 }),
-        ],
-      },
-    },
-  ]);
-  const parsed = JSON.parse(exportedModelToRunPayload(html));
-  assert.deepEqual(parsed.runtimeNodeStates, { source: { disabled: false }, writer: { disabled: true } });
-  assert.deepEqual(
-    parsed.outputs.map(({ target_node, target_port, total_row_count }) => ({
-      target_node,
-      target_port,
-      total_row_count,
-    })),
-    [
-      { target_node: 'source', target_port: 'data', total_row_count: 4000 },
-      { target_node: 'source', target_port: 'summary', total_row_count: 1 },
-    ]
-  );
-  assert.deepEqual(parsed.files, [files]);
-});
-
-test('singleton runtime states survive missing tables and later states replace earlier ones', () => {
-  const parsed = JSON.parse(
-    exportedModelToRunPayload(
-      notebookHtml([
-        { command: 'run()', results: nodeState('writer', true) },
-        { command: 'run()', results: nodeState('writer', false) },
-        { command: 'group_gate()', results: nodeState('group', true) },
-      ])
-    )
-  );
-  assert.deepEqual(parsed.runtimeNodeStates, { writer: { disabled: false }, group: { disabled: true } });
-  assert.deepEqual(parsed.outputs, []);
-});
-
-test('malformed runtime metadata preserves valid sibling state and results', () => {
-  const invalid = [
-    null,
-    'not JSON',
-    [],
-    {},
-    { nodeId: '', disabled: true },
-    { nodeId: 'source', disabled: 'true' },
-    { nodeId: 'source', disabled: 1 },
-  ];
-  const parsed = JSON.parse(
-    exportedModelToRunPayload(
-      notebookHtml([
-        {
-          command: 'display(ctx["source.data"])',
-          results: {
-            data: [
-              nodeState('source', false),
-              ...invalid.map((payload) => ({ type: 'mimeBundle', data: { [NODE_STATE_MIME_TYPE]: payload } })),
-              displayTable(1, false),
-            ],
-          },
-        },
-      ])
-    )
-  );
-  assert.deepEqual(parsed.runtimeNodeStates, { source: { disabled: false } });
-  assert.equal(parsed.outputs[0].target_port, 'data');
-});
-
-test('runtime node names cannot modify the state map prototype', () => {
-  const blocks = [{ type: 'output', id: 'data', label: 'Hidden data', nodeId: '__proto__', port: 'data' }];
-  const raw = exportedModelToRunPayload(
-    notebookHtml([
-      {
-        command: 'display(ctx["__proto__.data"])',
-        results: { data: [nodeState('__proto__', true), displayTable(1, false)] },
-      },
-    ])
-  );
-  const parsed = JSON.parse(raw);
-  assert.equal(Object.hasOwn(parsed.runtimeNodeStates, '__proto__'), true);
-  assert.equal(parsed.runtimeNodeStates.__proto__.disabled, true);
-  const result = parseRunOutcome(matchRunOutputs(blocks, raw));
-  assert.equal(result.outputs[0].disabled, true);
-  assert.equal(publishedBlocksHtml(blocks, result.outputs), '');
-});
-
-const ENVIRONMENT_BLOCKS = [
-  { type: 'output', id: 'prod', label: 'Prod Output', nodeId: 'prod', port: 'data' },
-  { type: 'output', id: 'dev', label: 'Dev Output', nodeId: 'dev', port: 'data' },
-];
-
-function environmentResult(environment) {
-  return matchedRunOutputs(
-    ENVIRONMENT_BLOCKS,
-    ['prod', 'dev'].map((nodeId) => ({
-      command: `display(ctx["${nodeId}.data"])`,
-      results: { data: [nodeState(nodeId, nodeId !== environment), displayTable(1, false)] },
-    }))
-  );
-}
-
-const GROUP_ENVIRONMENT_BLOCKS = ENVIRONMENT_BLOCKS.map((block) => ({
-  ...block,
-  parentGroupId: `group_${block.nodeId}`,
-}));
-
-for (const environment of ['prod', 'dev']) {
-  test(`native group-only state renders the ${environment} branch without member state`, () => {
-    const manifest = parseAppManifest({
-      version: 8,
-      appName: 'Environment branches',
-      blocks: GROUP_ENVIRONMENT_BLOCKS,
-      parameters: [],
-    });
-    const commands = [
-      ...['prod', 'dev'].map((nodeId) => ({
-        command: '_lb_groups = globals().setdefault("_lb_groups", {})',
-        results: nodeState(`group_${nodeId}`, nodeId !== environment),
-      })),
-      ...['prod', 'dev'].map((nodeId) => ({
-        command: `display(ctx["${nodeId}.data"])`,
-        results: displayTable(nodeId === environment ? 1 : 0, false),
-      })),
-    ];
-    const result = matchedRunOutputs(manifest.blocks, commands);
-    assert.deepEqual(
-      result.outputs.map(({ id, disabled }) => ({ id, disabled })),
-      [
-        { id: 'prod', disabled: environment !== 'prod' },
-        { id: 'dev', disabled: environment !== 'dev' },
-      ]
-    );
-    const html = publishedBlocksHtml(manifest.blocks, result.outputs);
-    assert.match(html, environment === 'prod' ? /Prod Output/ : /Dev Output/);
-    assert.doesNotMatch(html, environment === 'prod' ? /Dev Output/ : /Prod Output/);
-    assert.match(html, /<table/);
-  });
-}
-
-for (const [ownDisabled, groupDisabled, expected] of [
-  [false, true, true],
-  [true, false, true],
-  [false, false, false],
-  [true, true, true],
-]) {
-  test(`combines own ${ownDisabled} and group ${groupDisabled} disablement as ${expected}`, () => {
-    const blocks = [GROUP_ENVIRONMENT_BLOCKS[0]];
-    const result = matchedRunOutputs(blocks, [
-      { command: 'group_gate()', results: nodeState('group_prod', groupDisabled) },
-      {
-        command: 'display(ctx["prod.data"])',
-        results: { data: [nodeState('prod', ownDisabled), displayTable(1, false)] },
-      },
-    ]);
-    assert.equal(result.outputs[0].disabled, expected);
-    const html = publishedBlocksHtml(blocks, result.outputs);
-    if (expected) assert.equal(html, '');
-    else {
-      assert.match(html, /Prod Output/);
-      assert.match(html, /<table/);
-    }
-  });
-}
-
-test('native disabled group hides file members without preview or file receipt', () => {
-  const blocks = GROUP_ENVIRONMENT_BLOCKS.map((block) => ({
-    ...block,
-    fileOutput: { volumes: ['main.apps.files'] },
-  }));
-  const result = matchedRunOutputs(blocks, [
-    { command: 'group_gate()', results: nodeState('group_prod', true) },
-    { command: 'group_gate()', results: nodeState('group_dev', false) },
-  ]);
-  assert.deepEqual(
-    result.outputs.map(({ disabled, files }) => ({ disabled, files })),
-    [
-      { disabled: true, files: [] },
-      { disabled: false, files: [] },
-    ]
-  );
-  const html = publishedBlocksHtml(blocks, result.outputs);
-  assert.doesNotMatch(html, /Prod Output/);
-  assert.match(html, /Dev Output/);
-  assert.match(html, /This output was not returned/);
-});
-
-test('literal disablement hides a table without runtime metadata while a missing sibling remains visible', () => {
-  const blocks = [{ ...ENVIRONMENT_BLOCKS[0], disabled: true }, ENVIRONMENT_BLOCKS[1]];
-  const result = matchedRunOutputs(blocks, []);
-  assert.equal(result.outcome, 'outputs');
-  assert.equal(result.outputs[0].disabled, true);
-  assert.equal(result.outputs[1].disabled, undefined);
-  const html = publishedBlocksHtml(blocks, result.outputs);
-  assert.doesNotMatch(html, /Prod Output/);
-  assert.match(html, /Dev Output/);
-  assert.match(html, /This output was not returned/);
-});
-
-test('native own state supersedes a manifest literal fallback', () => {
-  const blocks = [{ ...ENVIRONMENT_BLOCKS[0], disabled: true }];
-  const result = matchedRunOutputs(blocks, [
-    {
-      command: 'display(ctx["prod.data"])',
-      results: { data: [nodeState('prod', false), displayTable(0, false)] },
-    },
-  ]);
-  assert.equal(result.outputs[0].disabled, false);
-  const html = publishedBlocksHtml(blocks, result.outputs);
-  assert.match(html, /Prod Output/);
-  assert.match(html, /No rows returned/);
-});
-
-test('missing or malformed parent state does not hide an empty output', () => {
-  const blocks = [GROUP_ENVIRONMENT_BLOCKS[0]];
-  for (const disabled of [undefined, null, 'true', 'false', 0, 1, {}, []]) {
-    const result = matchedRunOutputs(blocks, [
-      {
-        command: 'display(ctx["prod.data"])',
-        results: { data: [nodeState('group_prod', disabled), displayTable(0, false)] },
-      },
-    ]);
-    assert.equal(result.outputs[0].disabled, undefined);
-    const html = publishedBlocksHtml(blocks, result.outputs);
-    assert.match(html, /Prod Output/);
-    assert.match(html, /No rows returned/);
-  }
-});
-
 test('optional execution metadata preserves valid fields and ignores malformed values', () => {
   const base = { version: 8, appName: 'Branch outputs', blocks: ENVIRONMENT_BLOCKS, parameters: [] };
   for (const disabled of [true, false]) {
@@ -599,109 +266,6 @@ test('optional execution metadata preserves valid fields and ignores malformed v
   for (const parentGroupId of [undefined, null, '', true, false, 0, 1, {}, []]) {
     const parsed = parseAppManifest({ ...base, blocks: [{ ...ENVIRONMENT_BLOCKS[0], parentGroupId }] });
     assert.deepEqual(parsed.blocks, [ENVIRONMENT_BLOCKS[0]]);
-  }
-});
-
-for (const environment of ['prod', 'dev']) {
-  test(`only renders the ${environment} branch recorded by the run`, () => {
-    const result = environmentResult(environment);
-    assert.deepEqual(
-      result.outputs.map(({ id, disabled }) => ({ id, disabled })),
-      [
-        { id: 'prod', disabled: environment !== 'prod' },
-        { id: 'dev', disabled: environment !== 'dev' },
-      ]
-    );
-    const html = publishedBlocksHtml(ENVIRONMENT_BLOCKS, result.outputs);
-    assert.match(html, environment === 'prod' ? /Prod Output/ : /Dev Output/);
-    assert.doesNotMatch(html, environment === 'prod' ? /Dev Output/ : /Prod Output/);
-    assert.match(html, /<table/);
-  });
-}
-
-test('disabled outputs without a preview or file receipt hide their entire block', () => {
-  const blocks = [
-    { type: 'markdown', id: 'intro', text: 'Download your output' },
-    ...ENVIRONMENT_BLOCKS.map((block) => ({ ...block, fileOutput: { volumes: ['main.apps.files'] } })),
-  ];
-  const result = matchedRunOutputs(
-    blocks,
-    ['prod', 'dev'].map((nodeId) => ({
-      command: 'run()',
-      results: nodeState(nodeId, true),
-    }))
-  );
-  assert.equal(result.outcome, 'outputs');
-  assert.deepEqual(
-    result.outputs.map(({ disabled, files }) => ({ disabled, files })),
-    [
-      { disabled: true, files: [] },
-      { disabled: true, files: [] },
-    ]
-  );
-  const html = publishedBlocksHtml(blocks, result.outputs);
-  assert.match(html, /Download your output/);
-  assert.equal(html, publishedBlocksHtml([blocks[0]], []));
-});
-
-test('enabled empty results, errors, malformed results, and missing outputs remain visible', () => {
-  const blocks = [{ type: 'output', id: 'data', label: 'Visible Output', nodeId: 'source', port: 'data' }];
-  const cases = [
-    {
-      outcome: 'result',
-      payload: { ...outputFromTable(displayTable(0, false)), target_node: 'source', target_port: 'data' },
-      message: /No rows returned/,
-    },
-    {
-      outcome: 'computeError',
-      payload: {
-        status: 'error',
-        target_node: 'source',
-        target_port: 'data',
-        error: { type: 'BranchError', message: 'Read failed' },
-      },
-      message: /Read failed/,
-    },
-    { outcome: 'malformed', payload: { id: 'data', status: 'ok' }, message: /This output could not be read/ },
-    { outcome: 'missing', payload: undefined, message: /This output was not returned/ },
-  ];
-  for (const { outcome, payload, message } of cases) {
-    const result = parseRunOutcome(
-      matchRunOutputs(
-        blocks,
-        JSON.stringify({
-          version: 2,
-          outputs: payload ? [payload] : [],
-          runtimeNodeStates: { source: { disabled: false } },
-        })
-      )
-    );
-    assert.equal(result.outputs[0].disabled, false);
-    assert.equal(result.outputs[0].outcome.outcome, outcome);
-    const html = publishedBlocksHtml(blocks, result.outputs);
-    assert.match(html, /Visible Output/);
-    assert.match(html, message);
-  }
-});
-
-test('absent or non-boolean state preserves output visibility on the server and client', () => {
-  const blocks = [{ type: 'output', id: 'data', label: 'Legacy Output', nodeId: 'source', port: 'data' }];
-  for (const disabled of [undefined, null, 'true', 'false', 0, 1, {}, []]) {
-    const result = parseRunOutcome(
-      matchRunOutputs(
-        blocks,
-        JSON.stringify({
-          version: 2,
-          outputs: [{ ...outputFromTable(displayTable(0, false)), target_node: 'source', target_port: 'data' }],
-          runtimeNodeStates: { source: { disabled } },
-        })
-      )
-    );
-    assert.equal(result.outputs[0].disabled, undefined);
-    const client = parseRunOutcome({ ...result, outputs: [{ ...result.outputs[0], disabled }] });
-    assert.equal(client.outputs[0].disabled, undefined);
-    assert.match(publishedBlocksHtml(blocks, client.outputs), /Legacy Output/);
-    assert.match(publishedBlocksHtml(blocks, client.outputs), /No rows returned/);
   }
 });
 
@@ -796,8 +360,11 @@ test('hidden Markdown appears after completed empty results and errors, includin
     assert.equal(publishedBlocksHtml(blocks, [], state), '');
   }
   const outcomes = [
-    { outcome: 'result', payload: outputFromTable(displayTable(0, false)) },
-    { outcome: 'computeError', payload: { status: 'error', error: { type: 'ReadError', message: 'Read failed' } } },
+    { outcome: 'result', payload: preview(0, false) },
+    {
+      outcome: 'computeError',
+      payload: { status: 'error', target_node: 'source', error: { type: 'ReadError', message: 'Read failed' } },
+    },
   ];
   for (const outcome of outcomes) {
     const output = { key: 'declared:data', id: 'data', title: 'Data output', outcome };
@@ -819,8 +386,11 @@ test('available empty results and errors stay visible with hiding enabled, while
     hideUntilResults: true,
   };
   const outcomes = [
-    { outcome: 'result', payload: outputFromTable(displayTable(0, false)) },
-    { outcome: 'computeError', payload: { status: 'error', error: { type: 'ReadError', message: 'Read failed' } } },
+    { outcome: 'result', payload: preview(0, false) },
+    {
+      outcome: 'computeError',
+      payload: { status: 'error', target_node: 'source', error: { type: 'ReadError', message: 'Read failed' } },
+    },
     { outcome: 'missing', reason: 'The output was not returned.' },
     { outcome: 'malformed', reason: 'The output was unreadable.' },
   ];
@@ -861,164 +431,6 @@ test('file-only outcomes remain downloadable when output placeholders are hidden
   assert.doesNotMatch(html, /No table preview/);
 });
 
-test('explicit history selection uses that run’s disablement instead of the most recent result', () => {
-  const latest = {
-    status: 'found',
-    run: { jobRunId: '42' },
-    parameters: { environment: 'prod' },
-    result: environmentResult('prod'),
-  };
-  const historical = { status: 'found', outcome: environmentResult('dev') };
-  const selected = { jobRunId: '41', parameters: { environment: 'dev' } };
-  const idle = { phase: 'idle' };
-  const followed = { following: false, settled: false };
-  const display = planRunDisplay(idle, followed, latest, selected, historical);
-  assert.equal(display.displayedRun.jobRunId, '41');
-  assert.match(publishedBlocksHtml(ENVIRONMENT_BLOCKS, display.outputs), /Dev Output/);
-  assert.doesNotMatch(publishedBlocksHtml(ENVIRONMENT_BLOCKS, display.outputs), /Prod Output/);
-  const restored = planRunDisplay(idle, followed, latest);
-  assert.match(publishedBlocksHtml(ENVIRONMENT_BLOCKS, restored.outputs), /Prod Output/);
-  assert.doesNotMatch(publishedBlocksHtml(ENVIRONMENT_BLOCKS, restored.outputs), /Dev Output/);
-});
-
-function outputFromTable(table) {
-  const html = notebookHtml([
-    { command: 'display(ctx["source_0.data"])', results: { type: 'listResults', data: [table] } },
-  ]);
-  return JSON.parse(exportedModelToRunPayload(html)).outputs[0];
-}
-
-test('file receipts are decoded independently of tables and full counts without shifting display ports', () => {
-  const receipt = { node: 'output_0', files: [{ path: '/Volumes/main/apps/files/sheet.xlsx' }] };
-  const html = notebookHtml([
-    {
-      command: 'write_output()',
-      results: {
-        type: 'listResults',
-        data: [{ type: 'mimeBundle', data: { [FILES_MIME_TYPE]: JSON.stringify(receipt) } }],
-      },
-    },
-    {
-      command: 'display(ctx["source_0.data"])',
-      results: {
-        type: 'listResults',
-        data: [
-          { type: 'mimeBundle', data: { [FILES_MIME_TYPE]: { node: 'output_1', files: [] } } },
-          displayTable(2, true),
-          rowCounts('source_0', { data: 12345 }),
-        ],
-      },
-    },
-  ]);
-  const parsed = JSON.parse(exportedModelToRunPayload(html));
-  assert.deepEqual(parsed.files, [receipt, { node: 'output_1', files: [] }]);
-  assert.equal(parsed.outputs.length, 1);
-  assert.equal(parsed.outputs[0].target_node, 'source_0');
-  assert.equal(parsed.outputs[0].total_row_count, 12345);
-});
-
-test('a singleton file MIME receipt remains available when no preview was produced', () => {
-  const receipt = { node: 'output_0', files: [{ path: '/Volumes/main/apps/files/report.csv' }] };
-  const parsed = JSON.parse(
-    exportedModelToRunPayload(
-      notebookHtml([
-        {
-          command: 'write_file()',
-          results: { type: 'mimeBundle', data: { [FILES_MIME_TYPE]: receipt } },
-        },
-      ])
-    )
-  );
-  assert.deepEqual(parsed.files, [receipt]);
-  assert.deepEqual(parsed.outputs, []);
-});
-
-test('file MIME receipts retain their effective behavior and ignore unrecognized metadata', () => {
-  for (const behavior of [
-    'run_artifact',
-    'shared_append',
-    'shared_workbook_update',
-    undefined,
-    'overwrite',
-    null,
-    {},
-  ]) {
-    const receipt = { node: 'output_0', files: [{ path: '/Volumes/main/apps/files/report.csv' }], behavior };
-    const parsed = JSON.parse(
-      exportedModelToRunPayload(
-        notebookHtml([
-          {
-            command: 'write_file()',
-            results: { type: 'mimeBundle', data: { [FILES_MIME_TYPE]: receipt } },
-          },
-        ])
-      )
-    );
-    assert.deepEqual(parsed.files, [
-      {
-        node: receipt.node,
-        files: receipt.files,
-        ...(['run_artifact', 'shared_append', 'shared_workbook_update'].includes(behavior) ? { behavior } : {}),
-      },
-    ]);
-  }
-});
-
-test('malformed file receipts do not discard valid sibling receipts or table counts', () => {
-  const invalid = [
-    'not JSON',
-    {},
-    { node: 'output', files: [{}] },
-    { node: 'output', files: Array.from({ length: 51 }, () => ({ path: '/Volumes/a/b/c/data.csv' })) },
-  ];
-  const html = notebookHtml([
-    {
-      command: 'display(ctx["source_0.data"])',
-      results: {
-        data: [
-          ...invalid.map((receipt) => ({ type: 'mimeBundle', data: { [FILES_MIME_TYPE]: receipt } })),
-          displayTable(1, false),
-          rowCounts('source_0', { data: 1 }),
-        ],
-      },
-    },
-  ]);
-  const parsed = JSON.parse(exportedModelToRunPayload(html));
-  assert.deepEqual(parsed.files, []);
-  assert.equal(parsed.outputs[0].total_row_count, 1);
-});
-
-function parsePayload(payload) {
-  const result = parseRunOutcome({
-    outcome: 'outputs',
-    outputs: [{ id: 'output', title: 'Output', outcome: { outcome: 'result', payload } }],
-  });
-  assert.equal(result.outcome, 'outputs');
-  assert.equal(result.outputs[0].outcome.outcome, 'result');
-  return result.outputs[0].outcome.payload;
-}
-
-function footer(payload) {
-  return renderToStaticMarkup(createElement(ResultFooter, { payload }));
-}
-
-function outputSection(payload, chartSpec, files, fileBehavior) {
-  return renderToStaticMarkup(
-    createElement(OutputSection, {
-      output: {
-        key: 'output',
-        title: 'Published output',
-        chartSpec,
-        files,
-        fileBehavior,
-        outcome: { outcome: 'result', payload },
-      },
-      onRetry: () => {},
-      downloadRequest: files ? { runId: '42', outputId: 'output' } : undefined,
-    })
-  );
-}
-
 test('published blocks never render outputs outside the manifest', () => {
   const html = renderToStaticMarkup(
     createElement(PublishedBlocks, {
@@ -1046,7 +458,7 @@ test('published blocks never render outputs outside the manifest', () => {
 });
 
 test('tabular previews show result counts on one line without generic export controls', () => {
-  const payload = parsePayload(outputFromTable(displayTable(2, false)));
+  const payload = parsePayload(preview(2, false));
   const html = outputSection(payload);
   assert.match(html, /<table/);
   assert.match(html, />2 rows</);
@@ -1348,7 +760,7 @@ test('a failed run still exposes files it finished writing', () => {
 });
 
 test('historical file labels use the recorded behavior and preserve full row counts', () => {
-  const payload = { ...parsePayload(outputFromTable(displayTable(2, true))), total_row_count: 5000 };
+  const payload = { ...parsePayload(preview(2, true)), total_row_count: 5000 };
   const files = [{ path: '/Volumes/main/apps/files/report.csv' }];
   for (const [fileBehavior, label] of [
     ['run_artifact', 'Generated file'],
@@ -1385,7 +797,7 @@ test('historical file labels use the recorded behavior and preserve full row cou
 });
 
 test('legacy or unknown file behavior stays conservative even for a namespaced-looking path', () => {
-  const payload = parsePayload(outputFromTable(displayTable(2, false)));
+  const payload = parsePayload(preview(2, false));
   const files = [{ path: '/Volumes/main/apps/files/_designer_apps/namespace/attempt/node/report.csv' }];
   for (const fileBehavior of [undefined, 'overwrite', 'RUN_ARTIFACT', null, {}]) {
     const parsed = parseRunOutcome({
@@ -1419,7 +831,7 @@ for (const widgetType of ['line', 'pie', 'unsupported']) {
       },
     };
     for (const rowCount of [0, 2]) {
-      const payload = parsePayload(outputFromTable(displayTable(rowCount, false)));
+      const payload = parsePayload(preview(rowCount, false));
       const html = outputSection(payload, chartSpec);
       assert.match(html, /Published output/);
       if (widgetType === 'unsupported' && rowCount > 0) {
@@ -1435,7 +847,7 @@ for (const widgetType of ['line', 'pie', 'unsupported']) {
 }
 
 test('visualizations retain their truncated-data warning without the table footer or downloads', () => {
-  const payload = parsePayload(outputFromTable(displayTable(2, true)));
+  const payload = parsePayload(preview(2, true));
   const html = outputSection(payload, {
     widgetType: 'line',
     encodings: {
@@ -1450,7 +862,7 @@ test('visualizations retain their truncated-data warning without the table foote
 
 test('preserves notebook overflow without inventing a full count or a row-limit cause', () => {
   for (const rowCount of [0, 17, 1000, 1500]) {
-    const output = outputFromTable(displayTable(rowCount, true));
+    const output = parsePayload(preview(rowCount, true));
     assert.equal(output.rows.length, Math.min(rowCount, 1000));
     assert.equal(output.truncated, true);
     assert.equal(output.total_row_count, undefined);
@@ -1466,7 +878,7 @@ test('preserves notebook overflow without inventing a full count or a row-limit 
 
 for (const rowCount of [0, 999, 1000, 1001, 1500]) {
   test(`caps a complete ${rowCount}-row export and retains its exact count`, () => {
-    const output = outputFromTable(displayTable(rowCount, false));
+    const output = parsePayload(preview(rowCount, false));
     assert.equal(output.rows.length, Math.min(rowCount, 1000));
     assert.equal(output.truncated, rowCount > 1000);
     assert.equal(output.total_row_count, rowCount);
@@ -1489,7 +901,7 @@ for (const rowCount of [0, 999, 1000, 1001, 1500]) {
 test('missing or malformed overflow stays unknown even for an empty or exactly 1,000-row result', () => {
   for (const overflow of [undefined, null, 'false', 'true', 0, 1, {}]) {
     for (const rowCount of [0, 17, 1000]) {
-      const payload = parsePayload(outputFromTable(displayTable(rowCount, overflow)));
+      const payload = parsePayload(preview(rowCount, overflow));
       assert.equal(payload.truncated, null);
       assert.equal(payload.total_row_count, undefined);
       const html = footer(payload);
@@ -1500,46 +912,14 @@ test('missing or malformed overflow stays unknown even for an empty or exactly 1
 });
 
 test('the app cap proves truncation but not a total when source completeness is unknown', () => {
-  const payload = parsePayload(outputFromTable(displayTable(1001)));
+  const payload = parsePayload(preview(1001));
   assert.equal(payload.rows.length, 1000);
   assert.equal(payload.truncated, true);
   assert.equal(payload.total_row_count, undefined);
 });
 
-test('keeps overflow and counts isolated per displayed port, including encoded exports', () => {
-  const html = notebookHtml([
-    {
-      command: 'display(ctx["filter.filtered_data"])\ndisplay(ctx["filter.excluded_data"])',
-      results: { data: [displayTable(990, false), displayTable(1000, true)] },
-    },
-    { command: 'display(ctx["viz.data"])', results: { data: [displayTable(12, false)] } },
-  ]);
-  const plain = exportedModelToRunPayload(html);
-  assert.equal(exportedModelToRunPayload(Buffer.from(html).toString('base64')), plain);
-  assert.deepEqual(
-    JSON.parse(plain).outputs.map(({ target_node, target_port, rows, truncated, total_row_count }) => ({
-      target_node,
-      target_port,
-      rows: rows.length,
-      truncated,
-      total_row_count,
-    })),
-    [
-      { target_node: 'filter', target_port: 'filtered_data', rows: 990, truncated: false, total_row_count: 990 },
-      { target_node: 'filter', target_port: 'excluded_data', rows: 1000, truncated: true, total_row_count: undefined },
-      { target_node: 'viz', target_port: 'data', rows: 12, truncated: false, total_row_count: 12 },
-    ]
-  );
-});
-
-test('invalid notebook exports remain unreadable instead of fabricating an empty complete result', () => {
-  for (const html of [undefined, null, '', '<html>not a notebook</html>', "__DATABRICKS_NOTEBOOK_MODEL = 'invalid'"]) {
-    assert.equal(exportedModelToRunPayload(html), undefined);
-  }
-});
-
 test('client also caps oversized payloads before rendering a table or feeding a chart', () => {
-  const raw = outputFromTable(displayTable(1, false));
+  const raw = preview(1, false);
   raw.rows = Array.from({ length: 1500 }, (_, value) => ({ value }));
   delete raw.total_row_count;
   const payload = parsePayload(raw);
@@ -1555,64 +935,15 @@ test('client also caps oversized payloads before rendering a table or feeding a 
 });
 
 test('renders a separately supplied exact total without downloading those rows', () => {
-  const payload = parsePayload({ ...outputFromTable(displayTable(1000, true)), total_row_count: 558837 });
+  const payload = parsePayload({ ...preview(1000, true), total_row_count: 558837 });
   assert.equal(payload.rows.length, 1000);
   assert.equal(payload.total_row_count, 558837);
   assert.match(footer(payload), /Showing 1,000 of 558,837 rows/);
 });
 
-test('reads exact per-port totals from the runner count metadata without shifting table results', () => {
-  const html = notebookHtml([
-    {
-      command: 'display(ctx["filter.filtered_data"])\ndisplay(ctx["filter.excluded_data"])',
-      results: {
-        data: [
-          rowCounts('filter', { filtered_data: 558837, excluded_data: 12 }),
-          displayTable(1000, true),
-          displayTable(12, false),
-        ],
-      },
-    },
-  ]);
-
-  const outputs = JSON.parse(exportedModelToRunPayload(html)).outputs;
-  assert.deepEqual(
-    outputs.map(({ target_port, rows, total_row_count }) => ({
-      target_port,
-      rows: rows.length,
-      total_row_count,
-    })),
-    [
-      { target_port: 'filtered_data', rows: 1000, total_row_count: 558837 },
-      { target_port: 'excluded_data', rows: 12, total_row_count: 12 },
-    ]
-  );
-  assert.match(footer(parsePayload(outputs[0])), /Showing 1,000 of 558,837 rows/);
-});
-
-test('ignores malformed count metadata and preserves the preview completeness signal', () => {
-  for (const marker of [
-    rowCounts('', { data: 50 }),
-    rowCounts('source_0', {}),
-    rowCounts('source_0', { data: -1 }),
-    rowCounts('source_0', { data: 1.5 }),
-    rowCounts('source_0', { data: '50' }),
-  ]) {
-    const html = notebookHtml([
-      {
-        command: 'display(ctx["source_0.data"])',
-        results: { data: [displayTable(10, true), marker] },
-      },
-    ]);
-    const output = JSON.parse(exportedModelToRunPayload(html)).outputs[0];
-    assert.equal(output.total_row_count, undefined);
-    assert.equal(output.truncated, true);
-  }
-});
-
 test('rejects impossible or unsafe totals instead of labeling a truncated preview as complete', () => {
   for (const total of [-1, 0, 999, 1000, 1000.5, '558837', null, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
-    const payload = parsePayload({ ...outputFromTable(displayTable(1000, true)), total_row_count: total });
+    const payload = parsePayload({ ...preview(1000, true), total_row_count: total });
     assert.equal(payload.total_row_count, undefined);
     assert.equal(payload.truncated, true);
     assert.match(footer(payload), /1,000 preview rows · /);
@@ -1621,80 +952,20 @@ test('rejects impossible or unsafe totals instead of labeling a truncated previe
 });
 
 test('an exact total larger than the returned rows proves truncation despite an inconsistent flag', () => {
-  const payload = parsePayload({ ...outputFromTable(displayTable(10, false)), total_row_count: 20 });
+  const payload = parsePayload({ ...preview(10, false), total_row_count: 20 });
   assert.equal(payload.truncated, true);
   assert.equal(payload.total_row_count, 20);
   assert.match(footer(payload), /Showing 10 of 20 rows/);
 });
 
 test('missing client metadata does not imply completeness or break rendering', () => {
-  const raw = outputFromTable(displayTable(10, false));
+  const raw = preview(10, false);
   delete raw.truncated;
   delete raw.total_row_count;
   const payload = parsePayload(raw);
   assert.equal(payload.truncated, null);
   assert.equal(payload.total_row_count, undefined);
   assert.match(footer(payload), /10 returned rows/);
-});
-
-const HTML_BLOCK = { type: 'output', id: 'page', nodeId: 'html_1', kind: 'html', label: 'Report' };
-const htmlCommand = (html, extra = {}) => ({
-  command: '# designer-app-html-output: "html_1"',
-  results: { type: 'listResults', data: [{ type: 'mimeBundle', data: { 'text/html': html } }] },
-  ...extra,
-});
-
-test('binds exported HTML to its selected node alongside a table, ignoring unrelated HTML', () => {
-  const markup = '<h1>東京</h1><script>const report = window.inputs;</script>';
-  const result = matchedRunOutputs(
-    [HTML_BLOCK, { type: 'output', id: 'table', nodeId: 'source', port: 'data', label: 'Rows' }],
-    [
-      htmlCommand('<h1>unselected</h1>', { command: 'displayHTML("unselected")' }),
-      htmlCommand(markup),
-      { command: 'display(ctx["source.data"])', results: displayTable(3, false) },
-    ]
-  );
-  assert.equal(result.outcome, 'outputs');
-  assert.deepEqual(result.outputs[0].outcome, { outcome: 'html', html: markup });
-  assert.equal(result.outputs[1].outcome.payload.rows.length, 3);
-  assert.equal(result.outputs.length, 2);
-  const rendered = renderToStaticMarkup(createElement(OutputSection, { output: result.outputs[0], onRetry() {} }));
-  assert.match(rendered, /frame-src &#x27;none&#x27;/);
-  assert.doesNotMatch(rendered, /const report/);
-  assert.match(rendered, /title="Report"/);
-  assert.match(rendered, /srcDoc=/i);
-  assert.doesNotMatch(rendered, /allow-same-origin/);
-});
-
-test('refuses oversized or ambiguous HTML while retaining valid siblings', () => {
-  for (const results of [
-    { type: 'mimeBundle', data: { 'text/html': 'x'.repeat(4 * 1024 * 1024 + 1) } },
-    { type: 'listResults', data: ['one', 'two'].map((html) => ({ type: 'mimeBundle', data: { 'text/html': html } })) },
-  ]) {
-    const result = matchedRunOutputs([HTML_BLOCK], [htmlCommand('', { results })]);
-    assert.equal(result.outputs[0].outcome.outcome, 'computeError');
-    assert.equal(result.outputs[0].outcome.payload.error.type, 'HtmlOutputError');
-  }
-});
-
-test('HTML selection cannot bind a table or an HTML result with a different node', () => {
-  const result = matchedRunOutputs(
-    [HTML_BLOCK],
-    [
-      htmlCommand('<h1>Other</h1>', { command: '# designer-app-html-output: "other"' }),
-      { command: 'display(ctx["html_1.data"])', results: displayTable(1, false) },
-    ]
-  );
-  assert.equal(result.outputs[0].outcome.outcome, 'missing');
-});
-
-test('supports direct sandbox results and disabled HTML nodes', () => {
-  const html = '<p>HTML</p>';
-  const result = matchedRunOutputs([HTML_BLOCK], [htmlCommand('', { results: { type: 'htmlSandbox', data: html } })]);
-  assert.deepEqual(result.outputs[0].outcome, { outcome: 'html', html });
-  const disabled = matchedRunOutputs([HTML_BLOCK], [{ command: '', results: nodeState('html_1', true) }]);
-  assert.equal(disabled.outputs[0].disabled, true);
-  assert.equal(renderToStaticMarkup(createElement(OutputSection, { output: disabled.outputs[0], onRetry() {} })), '');
 });
 
 test('manifest retains HTML without a port and discards contradictory output declarations', () => {

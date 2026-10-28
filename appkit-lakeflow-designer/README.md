@@ -1,7 +1,7 @@
 # appkit-lakeflow-designer
 
-The published Lakeflow Designer app: a Vite + React client and a Node/AppKit server. One published
-Databricks App is deployed in the selected App Space for each published Designer App document.
+The published Lakeflow Designer app: a Vite + React client and AppKit's beta `designer()` server
+plugin. One Databricks App is deployed in the selected App Space for each published Designer App document.
 Publishing snapshots this template from a pinned commit in a workspace Git folder.
 
 This template is provisioned through **Publish App in Lakeflow Designer**. It requires the
@@ -77,11 +77,11 @@ run search follows those cursors automatically.
 
 ## Layout
 
-- `server/server.ts` — the Node/AppKit server (TypeScript). Type-checked and bundled by
-  `build:server` (`tsc -b` + `tsdown`) to `dist/server.js`, which `start` runs.
-- `server/uploads.ts` / `server/outputFiles.ts` — upload, uploaded-input download, and native
-  Output-file download routes. Both download paths share `server/fileDownloads.ts` for streaming.
-  Backend-only AppKit Files adapters enforce separate upload and read-only output policies.
+- `server/server.ts` — registers AppKit's `server()` and beta `designer()` plugins. Type-checked
+  and bundled by `build:server` (`tsc -b` + `tsdown`) to `dist/server.js`.
+- `@databricks/appkit/beta/designer` — browser-safe manifest schemas, types, and shared helpers.
+  The plugin owns manifest loading, Job orchestration, output decoding, authorization, and file
+  transfers. Those implementations and their backend regression tests live in AppKit.
 - `client/` — the React client, built by Vite to `client/dist`.
 - `app.yaml` — start command and env bindings (`command: ['pnpm', 'run', 'start']`).
 - `tsconfig.shared.json` / `tsconfig.server.json` / `tsconfig.client.json` — a strict shared base
@@ -90,6 +90,19 @@ run search follows those cursors automatically.
   (`node ./dist/server.js`). Runtime packages are under `dependencies`; TypeScript, Vite and
   other build/test tools are under `devDependencies`. Install development dependencies before
   building, even when the resulting server will run with `NODE_ENV=production`.
+
+## AppKit release dependency
+
+This migration depends on [AppKit PR 696](https://github.com/databricks/appkit/pull/696).
+The checked-in 0.89.0 SDK does not include `designer()` or its browser contract entry point.
+Keep this change in draft until a release containing that PR is available, then update the exact
+AppKit dependency and pnpm lockfile before merging. Merging the AppKit PR alone is insufficient.
+
+For validation before release, build and pack the SDK from that PR and install the tarball in a
+local copy of this template. Follow the [AppKit plugin guide's packaged-integration instructions](https://github.com/edcheung1/appkit/blob/edcheung1/designer-plugin/docs/docs/plugins/designer.md).
+Do not commit a local link, tarball, or guessed release version. After the dependency update,
+advance the Designer publisher's template revision and redeploy Apps that should use the plugin.
+The API remains `/api/designer` and the manifest remains v8; no codegen change is required.
 
 ## Local development and validation
 
@@ -105,7 +118,8 @@ pnpm run dev
 Configure workspace authentication and the published runner Job in `.env`. The AppKit server
 serves both the API and Vite client with hot reload at the URL printed on startup. Remote serving
 is disabled, as it is in `app.yaml`. Run submission still requires the authenticated identity
-supplied by Databricks Apps ingress; use a deployed App to validate that flow.
+supplied by Databricks Apps ingress. A local test may supply a trusted identity header with its
+own workspace credentials; validate the deployed App's ingress and service-principal grants separately.
 
 ```bash
 pnpm run typecheck
@@ -123,9 +137,10 @@ this template without a workspace; they do not replace deployed Jobs, ingress an
 
 The `pnpm-lock.yaml` lockfile and `pnpm-workspace.yaml` overrides pin compatible security fixes,
 including AppKit's YAML, DOMPurify and ECharts dependencies. Recheck these overrides when upgrading
-AppKit. Both AppKit packages are pinned to 0.89.0. The workspace file also allows esbuild's install
-script and disables the informational AppKit and protobufjs postinstall scripts. Express is an
-explicit test dependency, using the same version as AppKit; tests do not depend on npm hoisting.
+AppKit. The release dependency above must be resolved before this migration can build from a clean
+install. The workspace file also allows esbuild's install script and disables the informational
+AppKit and protobufjs postinstall scripts. Backend dependencies such as Express, YAML, and Zod
+come from AppKit; the template does not import them directly.
 
 Zod, qs and the affected OpenTelemetry packages are pinned to security fixes. Vite 7.3.7 replaces
 the rolldown-vite alias because Rolldown incorrectly removes an optional-chain guard in Zod's
@@ -223,8 +238,7 @@ the Job. Earlier warnings and any completed outputs remain available when a late
 
 The server reads existing `[guardrails]` markers from annotated cells' stdout and error details.
 It deduplicates by operator and check, with failures taking precedence. Operator names come from
-the run's own YAML annotations. The existing AppKit dependency `yaml` 2.8.2 (ISC) is pinned as a
-direct dependency with its existing lockfile integrity hash to read these annotations.
+the run's own YAML annotations. The Designer plugin parses those annotations using AppKit's YAML dependency.
 Failed runs also read Jobs task errors as a fallback; when the export cannot identify the operator,
 the summary labels the check `Guardrails` rather than guessing its name. The actual task error is
 shown ahead of the generic Job state message. All messages render as plain text.
@@ -298,7 +312,7 @@ Manifest v8 uses an optional storage declaration for uploads:
 }
 ```
 
-The server/client accept v6 only. Apps without file parameters may omit upload storage; a file
+The plugin and client accept v8 only. Apps without file parameters may omit upload storage; a file
 parameter without valid storage is rejected. File inputs are never downgraded
 to text or the author's original source path.
 The template and publisher use this single current manifest contract. Uploads and volume switching
@@ -307,10 +321,10 @@ share Designer's existing `enableDesignerApps` gate.
 The author selects a UC volume in Designer; publishing binds it without creating another volume.
 The existing `designer_uploads` App resource with `WRITE_VOLUME` gives the app service
 principal read/write access; the runner job's run-as principal also needs read access. Uploads
-use AppKit's Files plugin, not workspace files or app-container disk. No operator code changes are needed.
-The plugin is initialized lazily from the manifest in a backend-only AppKit instance (no server plugin).
-Its generic file-browser routes are never mounted; the Designer routes enforce viewer/parameter ownership.
-Upload, bounded sidecar reads, metadata, directory creation, and deletion all use the plugin API.
+use the Designer plugin's private Files connector adapters. The plugin scopes each request to the
+validated manifest; it does not create nested AppKit instances or expose generic file-browser routes.
+Upload, bounded sidecar reads, metadata, directory creation, and deletion use the App service principal.
+No operator code changes are needed.
 
 Viewers stage files up to 5 GiB in the browser. Clicking Run streams the staged files through the app
 server to the configured Unity Catalog volume before starting the job. Bytes are capped while reading, and the
@@ -344,10 +358,10 @@ current file parameter, completion record and recorded size. They do not start a
 or delete the upload. Changing the upload root or removing the file parameter makes old links
 unavailable; retained files still require volume-owner cleanup. Interrupted downloads can be retried.
 
-File Outputs write directly to their author-configured destinations. Separate backend-only Files
-plugin policies restrict uploads to their subtree and native downloads to approved output volumes.
+File Outputs write directly to their author-configured destinations. The Designer plugin's separate
+storage adapters restrict uploads to their subtree and native downloads to approved output volumes.
 Existing files are not moved or deleted; viewers upload a new file after the app adopts the new root.
-The Files plugin refreshes its handle and path policy when either the volume or root changes;
+The Designer plugin uses the current manifest's volume and path policy for each request;
 no restart is needed. Overlapping requests retain their own manifest's policy. Requests already
 using the old volume may finish or fail if publishing removes its access.
 
@@ -373,15 +387,13 @@ configuration loads in the new page. If startup still fails or session storage i
 the user can reload manually. Other configuration, permission and network errors do not trigger
 automatic reloads. This adds no background polling or automatic Job submissions.
 
-`pnpm test` covers storage completion/partial failures, limits, parameter resolution and ownership
-policy with an in-memory storage boundary, plus server-route access checks, volume switches,
-stale-reference refusal before Job submission, upload cache invalidation, and history hydration.
-Download tests use real HTTP responses and cover original bytes/names, ownership isolation,
-missing or changed files, completed and interrupted transfers, and run-summary parameter links.
-Actual Apps ingress, UC provisioning/grants and Jobs
-execution still require a deployed smoke test, including resource read-back versus effective
-grant propagation and Jobs running as their configured run-as identity. Complete these checks before deploying
-the authoring and template changes.
+`pnpm test` covers the template's parameter controls, browser manifest/result parsing, visibility,
+file links, upload-cache invalidation, tables, charts, and run restoration. `pnpm run test:browser`
+exercises the actual React UI in Chrome. AppKit owns the backend tests for storage, authorization,
+streaming transfers, notebook decoding, and Job orchestration; see its Designer plugin test suite.
+
+Actual Apps ingress, UC provisioning/grants, and Jobs execution still require deployed validation,
+including effective grant propagation and Jobs running as their configured run-as identity.
 
 ## Native Output-file downloads
 
@@ -442,7 +454,8 @@ update preserves historical downloads when the file policy still matches. Change
 requires another App run.
 Treat generated runner files as immutable deployment artifacts; edit in Designer and republish.
 
-The App server streams UC bytes through backend-only AppKit Files handles using its service principal.
+The App server streams UC bytes through the Designer plugin's private Files connector adapters
+using its service principal.
 No storage credentials or presigned URLs reach the browser. No new Job, SQL warehouse, second file,
 staging volume, export cache, or deletion is involved. Upload storage is not required for file-only Apps.
 Completed and interrupted downloads retain the original file for repeated and concurrent downloads.

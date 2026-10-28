@@ -1,5 +1,9 @@
-import type { GuardrailDiagnostic } from '../../shared/guardrails';
-import type { AppManifestBlock, AppMarkdownBlock, AppOutputBlock } from '../../shared/appManifest';
+import type {
+  GuardrailDiagnostic,
+  AppManifestBlock,
+  AppMarkdownBlock,
+  AppOutputBlock,
+} from '@databricks/appkit/beta/designer';
 import type { LastRunState, LastRunSummary } from './lastRun';
 import type { RunHistoryEntry, SelectedRunState } from './runHistory';
 import type { MatchedOutput, RunOutcome, RunSnapshot } from './payload';

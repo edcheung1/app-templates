@@ -1,6 +1,6 @@
+import { uploadAccept } from '@databricks/appkit/beta/designer';
 import { useRef, useState, type DragEvent } from 'react';
 import { Button, cn, formatFileSize, Input } from '@databricks/appkit-ui/react';
-import { uploadAccept } from '../../shared/fileFormats';
 
 export interface FileParameterControlProps {
   name: string;

@@ -1,7 +1,11 @@
+import {
+  appManifestSchema,
+  type AppManifest,
+  isValidMultiselectValue,
+  errorMessage,
+  isRecord,
+} from '@databricks/appkit/beta/designer';
 import { CONFIG_ROUTE } from './routes';
-import { appManifestSchema, type AppManifest } from '../../shared/appManifest';
-import { isValidMultiselectValue } from '../../shared/multiselect';
-import { errorMessage, isRecord } from '../../shared/values';
 
 export type NotRunnableReason = 'noManifest' | 'noJob' | 'updating';
 

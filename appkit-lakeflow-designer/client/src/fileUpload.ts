@@ -3,10 +3,10 @@ import {
   MAX_UPLOAD_SIZE_LABEL,
   UPLOAD_REFERENCE,
   UPLOAD_UNAVAILABLE,
-} from '../../shared/storageConfig';
+  validateFileFormat,
+  isRecord,
+} from '@databricks/appkit/beta/designer';
 import { uploadsRoute } from './routes';
-import { validateFileFormat } from '../../shared/fileFormats';
-import { isRecord } from '../../shared/values';
 
 interface UploadChoice {
   reference: string;

@@ -8,6 +8,6 @@
     "noEmit": true,
     "rootDir": "./"
   },
-  "include": ["server/**/*", "shared/**/*"],
+  "include": ["server/**/*"],
   "exclude": ["node_modules", "dist", "client"]
 }

@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { UPLOAD_UNAVAILABLE, errorMessage, idString, isRecord } from '@databricks/appkit/beta/designer';
 import { parseRunSnapshot, type RunSnapshot } from './payload';
 import { RUN_ROUTE, runStatusRoute } from './routes';
 import { UploadUnavailableError } from './fileUpload';
-import { UPLOAD_UNAVAILABLE } from '../../shared/storageConfig';
-import { errorMessage, idString, isRecord } from '../../shared/values';
 
 export const POLL_INTERVAL_MS = 2000;
 const TICK_INTERVAL_MS = 250;
