@@ -1,4 +1,4 @@
-command: ['npm', 'run', 'start']
+command: ['pnpm', 'run', 'start']
 
 env:
   - name: DATABRICKS_JOB_ID

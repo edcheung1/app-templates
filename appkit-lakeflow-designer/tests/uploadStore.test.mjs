@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { after, before, mock, test } from 'node:test';
+import { after, before, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ApiError, createApp } from '@databricks/appkit';
 import { build } from 'tsdown';
@@ -23,7 +23,7 @@ const originals = Object.fromEntries(
 let cancelledReads = 0;
 
 function stored(path) {
-  const bytes = contents.get(decodeURIComponent(path));
+  const bytes = contents.get(path);
   if (!bytes) throw new ApiError('File missing', 'NOT_FOUND', 404);
   return bytes;
 }
@@ -32,43 +32,39 @@ before(async () => {
   process.env.NODE_ENV = 'production';
   process.env.DATABRICKS_WORKSPACE_ID = '1';
   process.env.DISABLE_APPKIT_INTERNAL_TELEMETRY = 'true';
-  // Exercise the installed Files plugin, replacing only the workspace/network boundary.
-  mock.method(globalThis, 'fetch', async (input, options) => {
-    const url = new URL(input);
-    assert.equal(url.origin, 'https://workspace.invalid');
-    assert.equal(options.method, 'PUT');
-    assert.equal(options.headers.get('Authorization'), 'Bearer test-token');
-    const path = decodeURIComponent(url.pathname.slice('/api/2.0/fs/files'.length));
-    const overwrite = url.searchParams.get('overwrite') === 'true';
+  // Exercise the installed Files plugin, replacing only the remote workspace boundary.
+  const upload = async (path, bytes, overwrite) => {
     assert.equal(overwrite, false);
-    if (contents.has(path) && !overwrite) return new Response('Already exists', { status: 409 });
-    const bytes =
-      options.body instanceof ReadableStream
-        ? Buffer.from(await new Response(options.body).arrayBuffer())
-        : Buffer.from(options.body);
-    contents.set(path, bytes);
-    return new Response(null, { status: 204 });
-  });
+    if (contents.has(path)) throw new ApiError('Already exists', 'ALREADY_EXISTS', 409);
+    contents.set(
+      path,
+      bytes instanceof ReadableStream ? Buffer.from(await new Response(bytes).arrayBuffer()) : Buffer.from(bytes)
+    );
+  };
   await createApp({
     plugins: [],
     client: {
+      getHost: async () => 'https://workspace.invalid',
       currentUser: { me: async () => ({ id: 'app-service-principal' }) },
-      config: {
-        host: 'https://workspace.invalid',
-        authenticate: async (headers) => {
-          headers.set('Authorization', 'Bearer test-token');
-        },
+      request: async ({ method, path, query, body }) => {
+        assert.ok(path.startsWith('/api/2.0/fs/files/Volumes/'));
+        const filePath = decodeURIComponent(path.slice('/api/2.0/fs/files'.length));
+        if (method === 'HEAD') {
+          return new Response(null, { headers: { 'content-length': String(stored(filePath).length) } });
+        }
+        assert.equal(method, 'PUT');
+        await upload(filePath, body, query.overwrite === 'true');
+        return new Response(null, { status: 204 });
       },
-      apiClient: { userAgent: () => 'test' },
       files: {
-        createDirectory: async ({ directory_path }) => {
-          directories.add(decodeURIComponent(directory_path));
+        createDirectory: async ({ directoryPath }) => {
+          directories.add(directoryPath);
         },
-        download: async ({ file_path }) => ({
+        downloadFile: async ({ filePath }) => ({
           contents: new ReadableStream(
             {
               start(controller) {
-                controller.enqueue(stored(file_path));
+                controller.enqueue(stored(filePath));
               },
               pull(controller) {
                 controller.close();
@@ -80,17 +76,16 @@ before(async () => {
             { highWaterMark: 0 }
           ),
         }),
-        // HTTP response headers are strings at runtime despite the generated SDK's numeric type.
-        getMetadata: async ({ file_path }) => ({ 'content-length': String(stored(file_path).length) }),
-        listDirectoryContents: async function* ({ directory_path }) {
-          const prefix = `${decodeURIComponent(directory_path)}/`;
+        uploadFile: async ({ filePath, contents: bytes, overwrite }) => upload(filePath, bytes, overwrite),
+        listDirectoryContentsIter: async function* ({ directoryPath }) {
+          const prefix = `${directoryPath}/`;
           for (const path of [...directories, ...contents.keys()]) {
             if (path.startsWith(prefix) && !path.slice(prefix.length).includes('/'))
-              yield { name: path.slice(prefix.length), is_directory: directories.has(path) };
+              yield { name: path.slice(prefix.length), isDirectory: directories.has(path) };
           }
         },
-        delete: async ({ file_path }) => {
-          contents.delete(decodeURIComponent(file_path));
+        deleteFile: async ({ filePath }) => {
+          contents.delete(filePath);
         },
       },
     },
@@ -130,7 +125,6 @@ test('native output Files store reads exact original bytes repeatedly across sep
 });
 
 after(async () => {
-  mock.restoreAll();
   for (const [key, value] of Object.entries(originals)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;

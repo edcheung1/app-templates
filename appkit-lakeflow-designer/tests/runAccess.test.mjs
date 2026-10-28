@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { deflateSync, gzipSync } from 'node:zlib';
 import express from 'express';
 import { ApiError, files, createWorkspaceClient } from '@databricks/appkit';
 import { build } from 'tsdown';
@@ -58,6 +59,7 @@ async function harness(t) {
   const state = {
     requests: [],
     submissions: [],
+    failAcceptedSubmission: false,
     cancellations: [],
     runs: [],
     manifest: {
@@ -96,6 +98,18 @@ async function harness(t) {
         return send({ content: Buffer.from(JSON.stringify(state.manifest)).toString('base64') });
       }
       if (url.pathname.endsWith('/jobs/run-now')) {
+        const previous = state.submissions.find(
+          (submission) => submission.idempotency_token === body.idempotency_token
+        );
+        if (previous) {
+          const run = state.runs.find((run) =>
+            run.job_parameters.some(
+              ({ name, value }) =>
+                name === '_lb_app_submission_id' && value === previous.job_parameters._lb_app_submission_id
+            )
+          );
+          return send({ run_id: run.run_id });
+        }
         state.submissions.push(body);
         const run = {
           run_id: 1000 + state.submissions.length,
@@ -105,6 +119,11 @@ async function harness(t) {
           state: { life_cycle_state: 'RUNNING' },
         };
         state.runs.unshift(run);
+        if (state.failAcceptedSubmission) {
+          state.failAcceptedSubmission = false;
+          res.statusCode = 500;
+          return send({ error_code: 'INTERNAL_ERROR', message: 'Unexpected error' });
+        }
         return send({ run_id: run.run_id });
       }
       if (url.pathname.endsWith('/jobs/runs/get')) {
@@ -146,15 +165,25 @@ async function harness(t) {
     delete globalThis.designerTest;
   });
   const appUrl = await listen(t, createServer(app));
-  const call = (path, viewer = 'alice', method = 'GET', body) =>
+  const call = (path, viewer = 'alice', method = 'GET', body, contentEncoding) =>
     fetch(`${appUrl}/api/designer${path}`, {
       method,
       headers: {
         'content-type': 'application/json',
         'x-forwarded-user': viewer,
         'x-forwarded-email': `${viewer}@example.test`,
+        ...(contentEncoding ? { 'content-encoding': contentEncoding } : {}),
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined
+        ? {}
+        : {
+            body:
+              contentEncoding === 'gzip'
+                ? gzipSync(JSON.stringify(body))
+                : contentEncoding === 'deflate'
+                  ? deflateSync(JSON.stringify(body))
+                  : JSON.stringify(body),
+          }),
     });
   return { state, call };
 }
@@ -203,6 +232,32 @@ test('submissions pause until runner code and every default match the manifest',
   assert.deepEqual(state.submissions, []);
   Object.assign(notebook, published);
   assert.equal((await call('/run', 'alice', 'POST', {})).status, 200);
+});
+
+test('compressed JSON submissions preserve parameters through the HTTP parser', async (t) => {
+  const { state, call } = await harness(t);
+  for (const encoding of ['gzip', 'deflate']) {
+    const response = await call('/run', 'alice', 'POST', { params: { choice: encoding } }, encoding);
+    assert.equal(response.status, 200);
+    const { jobRunId } = await response.json();
+    const run = await (await call(`/run/${jobRunId}`)).json();
+    assert.deepEqual(run.parameters, { choice: encoding });
+  }
+  assert.equal(state.runs.length, 2);
+});
+
+test('SDK retries reuse the submission token without starting a second run', async (t) => {
+  const { state, call } = await harness(t);
+  state.failAcceptedSubmission = true;
+  const response = await call('/run', 'alice', 'POST', {});
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).jobRunId, '1001');
+  const attempts = state.requests.filter(({ path }) => path.endsWith('/jobs/run-now'));
+  assert.equal(attempts.length, 2);
+  const token = attempts[0].body.idempotency_token;
+  assert.equal(token, attempts[0].body.job_parameters._lb_app_submission_id);
+  assert.equal(attempts[1].body.idempotency_token, token);
+  assert.equal(state.runs.length, 1);
 });
 
 test('history preserves a continuation beyond 200 other viewers’ runs', async (t) => {

@@ -2,7 +2,7 @@ import { ApiError } from '@databricks/appkit';
 import type { AppStorage } from '../shared/storageConfig';
 import { UPLOAD_UNAVAILABLE, UPLOAD_UNAVAILABLE_MESSAGE } from '../shared/storageConfig';
 import { UploadError, type UploadStore } from './fileUploads';
-import { createUploadVolume, encodeStoragePath, parseStorageFileSize } from './storageVolume';
+import { createUploadVolume, parseStorageFileSize } from './storageVolume';
 
 let cachedVolume: { volume: string; path: string; promise: ReturnType<typeof createUploadVolume> } | undefined;
 
@@ -36,14 +36,12 @@ export function appKitUploadStore(config: AppStorage | undefined): UploadStore {
     }
   };
   return {
-    mkdir: (path) => access((volume) => volume.createDirectory(encodeStoragePath(path))),
-    put: (path, bytes) =>
-      access((volume) => volume.upload(encodeStoragePath(path), Buffer.from(bytes), { overwrite: false })),
-    putStream: (path, stream) =>
-      access((volume) => volume.upload(encodeStoragePath(path), stream, { overwrite: false })),
+    mkdir: (path) => access((volume) => volume.createDirectory(path)),
+    put: (path, bytes) => access((volume) => volume.upload(path, Buffer.from(bytes), { overwrite: false })),
+    putStream: (path, stream) => access((volume) => volume.upload(path, stream, { overwrite: false })),
     read: (path) =>
       access(async (volume) => {
-        const contents = await volume.read(encodeStoragePath(path), { maxSize: 16 * 1024 });
+        const contents = await volume.read(path, { maxSize: 16 * 1024 });
         try {
           const record: unknown = JSON.parse(contents);
           return record;
@@ -53,15 +51,15 @@ export function appKitUploadStore(config: AppStorage | undefined): UploadStore {
       }),
     download: (path) =>
       access(async (volume) => {
-        const result = await volume.download(encodeStoragePath(path));
+        const result = await volume.download(path);
         if (!result.contents) throw new UploadError(502, 'The uploaded file has no readable contents.');
         return result.contents;
       }),
     size: (path) =>
       access(async (volume) => {
-        const metadata = await volume.metadata(encodeStoragePath(path));
+        const metadata = await volume.metadata(path);
         return parseStorageFileSize(metadata.contentLength);
       }),
-    delete: (path) => access((volume) => volume.delete(encodeStoragePath(path))),
+    delete: (path) => access((volume) => volume.delete(path)),
   };
 }

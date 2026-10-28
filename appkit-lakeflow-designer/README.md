@@ -68,7 +68,8 @@ concurrent publishers.
 Ordinary Apps allow five concurrent runs. Apps with file Outputs allow one run at a time to protect
 shared append and workbook updates. Both explicitly enable Jobs queueing. The UI retains an
 accepted run through temporary status failures, retries reads, and exposes cancellation failures
-so the consumer can retry. It never retries Job submission automatically.
+so the consumer can retry. The browser never retries Job submission automatically. SDK transport
+retries reuse the submission ID as the Jobs idempotency token to avoid starting duplicate runs.
 
 History filters every run by viewer and returns a continuation cursor when a bounded scan has not
 reached the end. “Load older runs” continues beyond pages filled by other viewers. The last-successful
@@ -82,7 +83,7 @@ run search follows those cursors automatically.
   Output-file download routes. Both download paths share `server/fileDownloads.ts` for streaming.
   Backend-only AppKit Files adapters enforce separate upload and read-only output policies.
 - `client/` — the React client, built by Vite to `client/dist`.
-- `app.yaml` — start command and env bindings (`command: ['npm', 'run', 'start']`).
+- `app.yaml` — start command and env bindings (`command: ['pnpm', 'run', 'start']`).
 - `tsconfig.shared.json` / `tsconfig.server.json` / `tsconfig.client.json` — a strict shared base
   with a server (Node) and a client (DOM) project, referenced by the root `tsconfig.json`.
 - `package.json` — `build` (`build:server` then `build:client`) and `start`
@@ -92,12 +93,13 @@ run search follows those cursors automatically.
 
 ## Local development and validation
 
-Use Node.js 22.13 or newer and npm. From this template directory:
+Use Node.js 22.13 or newer and pnpm 11.0.8, pinned in `packageManager`. With Corepack installed,
+run `corepack enable` to make the pinned pnpm command available. From this template directory:
 
 ```bash
-npm ci --include=dev
+pnpm install --frozen-lockfile --prod=false
 cp .env.example .env
-npm run dev
+pnpm run dev
 ```
 
 Configure workspace authentication and the published runner Job in `.env`. The AppKit server
@@ -106,21 +108,29 @@ is disabled, as it is in `app.yaml`. Run submission still requires the authentic
 supplied by Databricks Apps ingress; use a deployed App to validate that flow.
 
 ```bash
-npm run typecheck
-npm run lint
-npm run format
-npm test
-npm run test:browser  # Requires local Chrome; set CHROME_BIN if needed.
-npm run build
-npm start
+pnpm run typecheck
+pnpm run lint
+pnpm run format
+pnpm test
+pnpm run test:browser  # Requires local Chrome; set CHROME_BIN if needed.
+pnpm run build
+pnpm start
 ```
 
 `lint:fix` and `format:fix` apply automatic fixes. ESLint, Prettier and `tsx` use the same pinned
 tool versions as the other AppKit templates. The Node test runner and Chrome fixtures exercise
 this template without a workspace; they do not replace deployed Jobs, ingress and UC validation.
 
-The lockfile and `overrides` pin compatible security fixes, including AppKit's YAML, DOMPurify
-and ECharts dependencies. Recheck these overrides when upgrading AppKit.
+The `pnpm-lock.yaml` lockfile and `pnpm-workspace.yaml` overrides pin compatible security fixes,
+including AppKit's YAML, DOMPurify and ECharts dependencies. Recheck these overrides when upgrading
+AppKit. Both AppKit packages are pinned to 0.89.0. The workspace file also allows esbuild's install
+script and disables the informational AppKit and protobufjs postinstall scripts. Express is an
+explicit test dependency, using the same version as AppKit; tests do not depend on npm hoisting.
+
+Zod, qs and the affected OpenTelemetry packages are pinned to security fixes. Vite 7.3.7 replaces
+the rolldown-vite alias because Rolldown incorrectly removes an optional-chain guard in Zod's
+browser bundle. The checked-in [body-parser patch](./patches/README.md) backports the upstream
+compressed-request fix until the patched release is available through the package proxy.
 
 ## Result previews
 
@@ -200,7 +210,7 @@ AppKit UI dependency) manages sorting, filtering, column visibility, and column 
 job-result rows; it is pinned as a direct dependency with its integrity hash in the lockfile.
 AppKit's packaged `DataTable` currently requires an analytics query rather than accepting supplied
 data. Sorting uses schema types and preserves
-the precision of string-encoded integers and decimals. Run `npm test` to validate sorting,
+the precision of string-encoded integers and decimals. Run `pnpm test` to validate sorting,
 filtering, visibility, unusual SQL column aliases, and bounded-preview rendering.
 
 ## Guardrails diagnostics
@@ -260,18 +270,17 @@ uses an estimated text width, not Designer's measured text layout. This is close
 not pixel-identical. Unsupported chart types, unrecognized sort settings, missing sort fields,
 and runtime rendering failures fall back to the result table.
 
-Run `npm test` with Node 22.18+ to check translation, sorting, and real Vega-Lite compilation/Vega
+Run `pnpm test` with Node 22.18+ to check translation, sorting, and real Vega-Lite compilation/Vega
 SVG rendering, including resizing, stacked totals, category colors, and empty results. No
 Playwright tests or additional test dependencies are required.
 
 The renderer pins [Vega](https://github.com/vega/vega) 6.2.0,
 [Vega-Lite](https://github.com/vega/vega-lite) 6.4.3, and
 [Vega Embed](https://github.com/vega/vega-embed) 7.0.2. All three use the BSD-3-Clause license;
-the lockfile records package integrity hashes. Installs during development use the internal
-package proxy, but the committed lockfile must use `https://registry.npmjs.org/` for all
-package URLs so published apps do not depend on corporate network access. After dependency
-updates, normalize any proxy URLs in the lockfile without changing versions or integrity
-hashes; changing npm's registry setting alone does not rewrite existing lockfile URLs.
+the pnpm lockfile records package versions and integrity hashes without binding registry packages
+to a particular registry. Databricks development installs use the internal npm proxy via local
+registry configuration. Keep corporate registry URLs out of the committed lockfile so published
+Apps can install from their configured registry.
 Chart rendering does not change the manifest or runner-job contracts.
 
 ## App upload storage and file parameters
@@ -364,7 +373,7 @@ configuration loads in the new page. If startup still fails or session storage i
 the user can reload manually. Other configuration, permission and network errors do not trigger
 automatic reloads. This adds no background polling or automatic Job submissions.
 
-`npm test` covers storage completion/partial failures, limits, parameter resolution and ownership
+`pnpm test` covers storage completion/partial failures, limits, parameter resolution and ownership
 policy with an in-memory storage boundary, plus server-route access checks, volume switches,
 stale-reference refusal before Job submission, upload cache invalidation, and history hydration.
 Download tests use real HTTP responses and cover original bytes/names, ownership isolation,
@@ -512,7 +521,7 @@ Before customer rollout, validate the origin checks through Apps ingress and rev
 the iframe/API boundary with security. Local browser checks and route tests do not
 establish protection against arbitrary data egress or browser resource exhaustion.
 
-Run `npm run test:browser` with a local Chrome installation (`CHROME_BIN` overrides
+Run `pnpm run test:browser` with a local Chrome installation (`CHROME_BIN` overrides
 the Linux default `/usr/bin/google-chrome`). It exercises the real React component
 in an isolated, headless Chrome profile, checks that blocked URLs never reach the
 local server, and covers rendering, resize/error messaging, output updates, wrapper

@@ -4,6 +4,7 @@
   "private": true,
   "main": "dist/server.js",
   "type": "module",
+  "packageManager": "pnpm@11.0.8",
   "description": "Published Lakeflow Designer app powered by AppKit",
   "engines": {
     "node": ">=22.13.0"
@@ -12,7 +13,7 @@
     "dev": "NODE_ENV=development DISABLE_REMOTE_SERVING=true tsx watch --tsconfig ./tsconfig.server.json --env-file-if-exists=./.env ./server/server.ts",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "test:browser": "tsc -p tests/browser/tsconfig.json && node --experimental-strip-types --test tests/browser/*.test.ts",
-    "build": "npm run build:server && npm run build:client",
+    "build": "pnpm run build:server && pnpm run build:client",
     "build:server": "tsc -b tsconfig.server.json && tsdown -c tsdown.server.config.ts",
     "build:client": "tsc -b tsconfig.client.json && vite build --config client/vite.config.ts",
     "start": "NODE_ENV=production node --env-file-if-exists=./.env ./dist/server.js",
@@ -23,9 +24,8 @@
     "format:fix": "prettier --write ."
   },
   "dependencies": {
-    "@databricks/appkit": "0.70.0",
-    "@databricks/appkit-ui": "0.70.0",
-    "@databricks/sdk-experimental": "0.17.0",
+    "@databricks/appkit": "0.89.0",
+    "@databricks/appkit-ui": "0.89.0",
     "@tanstack/react-table": "8.21.3",
     "react": "19.1.1",
     "react-dom": "19.1.1",
@@ -39,7 +39,7 @@
     "vega-embed": "7.0.2",
     "vega-lite": "6.4.3",
     "yaml": "2.8.3",
-    "zod": "4.3.6"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",
@@ -55,6 +55,7 @@
     "eslint-plugin-react": "7.37.5",
     "eslint-plugin-react-hooks": "7.0.1",
     "eslint-plugin-react-refresh": "0.4.24",
+    "express": "4.22.2",
     "globals": "14.0.0",
     "prettier": "3.6.2",
     "tailwindcss": "4.1.17",
@@ -62,16 +63,6 @@
     "tsx": "4.20.6",
     "typescript": "5.9.3",
     "typescript-eslint": "8.48.0",
-    "vite": "npm:rolldown-vite@7.1.14"
-  },
-  "overrides": {
-    "vite": "npm:rolldown-vite@7.1.14",
-    "@opentelemetry/core": "2.8.0",
-    "dompurify": "3.4.17",
-    "echarts": "6.1.0",
-    "js-yaml": "4.3.2",
-    "qs": "6.16.0",
-    "yaml": "$yaml",
-    "systeminformation": "5.31.7"
+    "vite": "7.3.7"
   }
 }

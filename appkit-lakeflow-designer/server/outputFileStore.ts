@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ApiError, createApp, files } from '@databricks/appkit';
 import { isOutputFilePath } from '../shared/fileOutputs';
-import { denyDiscoveredVolumes, encodeStoragePath, parseStorageFileSize, setupStorageVolume } from './storageVolume';
+import { denyDiscoveredVolumes, parseStorageFileSize, setupStorageVolume } from './storageVolume';
 
 export interface OutputFileStore {
   size(path: string): Promise<number | undefined>;
@@ -14,7 +14,7 @@ async function createOutputVolume(volume: string) {
     // different volumes (including uploads) from racing over a shared env binding.
     const key = `output_${createHash('sha256').update(volume).digest('hex')}`;
     process.env[`DATABRICKS_VOLUME_${key.toUpperCase()}`] = `/Volumes/${volume.replaceAll('.', '/')}`;
-    // AppKit 0.70's static manifest still requires this default binding even with named volumes.
+    // The Files plugin's static manifest requires this default binding even with named volumes.
     // It is never used by the output store and has a deny-all policy in this instance.
     process.env.DATABRICKS_VOLUME_FILES ??= `/Volumes/${volume.replaceAll('.', '/')}`;
     const appkit = await createApp({
@@ -55,7 +55,7 @@ export function appKitOutputFileStore(volume: string): OutputFileStore {
     async size(path) {
       if (!isOutputFilePath(path, { volumes: [volume] })) throw new Error('Invalid output file destination.');
       try {
-        return parseStorageFileSize((await (await handleForVolume()).metadata(encodeStoragePath(path))).contentLength);
+        return parseStorageFileSize((await (await handleForVolume()).metadata(path)).contentLength);
       } catch (error) {
         if (error instanceof ApiError && error.statusCode === 404) return undefined;
         throw error;
@@ -63,7 +63,7 @@ export function appKitOutputFileStore(volume: string): OutputFileStore {
     },
     async download(path) {
       if (!isOutputFilePath(path, { volumes: [volume] })) throw new Error('Invalid output file destination.');
-      const result = await (await handleForVolume()).download(encodeStoragePath(path));
+      const result = await (await handleForVolume()).download(path);
       if (!result.contents) throw new Error('The output file has no readable contents.');
       return result.contents;
     },

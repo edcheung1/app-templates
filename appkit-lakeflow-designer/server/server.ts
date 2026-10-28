@@ -1,4 +1,4 @@
-import { createApp, createWorkspaceClient, server, type WorkspaceClient } from '@databricks/appkit';
+import { createApp, createWorkspaceClient, server } from '@databricks/appkit';
 import { exportedModelToRunPayload, findNotebookModelValue } from './exportedRunOutput';
 import { matchRunOutputs } from './runOutputs';
 import type { Request, Response } from 'express';
@@ -50,12 +50,39 @@ const wsClient = () => {
   return workspaceClient;
 };
 
+// Runner/access checks consume the Jobs REST shape, including recorded parameter maps.
+async function readWorkspaceJson(
+  path: string,
+  query: Record<string, string | number | boolean | undefined>
+): Promise<unknown> {
+  const response = await wsClient().request({
+    method: 'GET',
+    path,
+    query: Object.fromEntries(
+      Object.entries(query)
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => [key, String(value)])
+    ),
+  });
+  return response.json();
+}
+
+const readJob = () => readWorkspaceJson('/api/2.2/jobs/get', { job_id: JOB_ID });
+const readRun = (runId: string | number) => readWorkspaceJson('/api/2.2/jobs/runs/get', { run_id: runId });
+
+function jobNotebookPaths(job: unknown): (string | undefined)[] {
+  const tasks = isRecord(job) && isRecord(job.settings) && Array.isArray(job.settings.tasks) ? job.settings.tasks : [];
+  return tasks.map((task: unknown) =>
+    isRecord(task) && isRecord(task.notebook_task) ? nonEmptyString(task.notebook_task.notebook_path) : undefined
+  );
+}
+
 const READ_RETRY_ATTEMPTS = 3;
 const READ_RETRY_BACKOFF_MS = 1000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Retry Jobs reads only; replaying runNow or cancelRun is unsafe.
+// Only reads get application-level retries; writes rely on the SDK transport.
 async function retryRead<T>(read: () => Promise<T>): Promise<T> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
@@ -102,10 +129,7 @@ async function resolveManifestFolder(): Promise<string | undefined> {
     return undefined;
   }
   try {
-    const job = await wsClient().jobs.get({ job_id: Number(JOB_ID) });
-    const notebookPath = job.settings?.tasks
-      ?.map((task) => task.notebook_task?.notebook_path)
-      .find((path): path is string => typeof path === 'string' && path !== '');
+    const notebookPath = jobNotebookPaths(await readJob()).find((path) => path !== undefined);
     if (notebookPath === undefined) {
       console.error('Could not find the runner notebook path on job', JOB_ID, 'to locate the app manifest');
       return undefined;
@@ -125,12 +149,8 @@ async function readManifest() {
   }
   const manifestPath = `${folder}/${MANIFEST_FILENAME}`;
   try {
-    // The AppKit facade exposes no workspace service, so reach it through the legacy client; export
-    // returns base64 content.
-    const exported = await wsClient()
-      .toLegacyWorkspaceClient()
-      .workspace.export({ path: manifestPath, format: 'SOURCE' });
-    if (typeof exported.content !== 'string') {
+    const exported = await readWorkspaceJson('/api/2.0/workspace/export', { path: manifestPath, format: 'SOURCE' });
+    if (!isRecord(exported) || typeof exported.content !== 'string') {
       return undefined;
     }
     return parseManifest(Buffer.from(exported.content, 'base64').toString('utf8'));
@@ -162,7 +182,7 @@ async function accessibleRun(
   if (hydrate && isRecord(run) && !Array.isArray(run.job_parameters)) {
     const id = idString(run.run_id);
     if (!id) return undefined;
-    detail = await wsClient().jobs.getRun({ run_id: Number(id) });
+    detail = await readRun(id);
   }
   return isRecord(detail) &&
     !isLegacyExportRun(detail) &&
@@ -181,7 +201,7 @@ async function readViewerRun(req: Request, res: Response) {
   }
   let run;
   try {
-    run = await retryRead(() => wsClient().jobs.getRun({ run_id: Number(jobRunId) }));
+    run = await retryRead(() => readRun(jobRunId));
   } catch (err) {
     res.status(502).json({ error: `Could not read run ${jobRunId}: ${errorMessage(err)}` });
     return undefined;
@@ -191,7 +211,7 @@ async function readViewerRun(req: Request, res: Response) {
     res.status(404).json({ error: `Run ${jobRunId} is not a run of this app.` });
     return undefined;
   }
-  return { jobRunId, run, visibleRun };
+  return { jobRunId, run: visibleRun };
 }
 
 async function declaredOutputs() {
@@ -201,7 +221,7 @@ async function declaredOutputs() {
 // The runs/export CODE view carries the displayed command results.
 async function readRunExport(taskRunId: string): Promise<unknown> {
   const exported = await retryRead(() =>
-    wsClient().jobs.exportRun({ run_id: Number(taskRunId), views_to_export: 'CODE' })
+    wsClient().jobs.exportRun({ runId: BigInt(taskRunId), viewsToExport: 'CODE' })
   );
   const views = isRecord(exported) && Array.isArray(exported.views) ? exported.views : [];
   // Probe with the decoder rather than a substring: a base64-wrapped view never contains the literal marker.
@@ -231,10 +251,10 @@ async function readCompletedTaskOutput(taskRunId: string, failed = false): Promi
   }
   const value = Promise.allSettled([
     readRunExport(taskRunId),
-    failed ? retryRead(() => wsClient().jobs.getRunOutput({ run_id: Number(taskRunId) })) : Promise.resolve(undefined),
+    failed ? retryRead(() => wsClient().jobs.getRunOutput({ runId: BigInt(taskRunId) })) : Promise.resolve(undefined),
   ]).then(([exported, taskOutput]) => {
     const taskError = taskOutput.status === 'fulfilled' ? taskOutput.value : undefined;
-    const taskErrorTexts = [taskError?.error, taskError?.error_trace].filter(
+    const taskErrorTexts = [taskError?.error, taskError?.errorTrace].filter(
       (text): text is string => typeof text === 'string'
     );
     const html = exported.status === 'fulfilled' ? exported.value : undefined;
@@ -245,7 +265,7 @@ async function readCompletedTaskOutput(taskRunId: string, failed = false): Promi
     }
     return {
       payload: exportedModelToRunPayload(html, taskErrorTexts),
-      failureReason: nonEmptyString(taskError?.error) ?? nonEmptyString(taskError?.error_trace),
+      failureReason: nonEmptyString(taskError?.error) ?? nonEmptyString(taskError?.errorTrace),
       ...(exported.status === 'rejected' ? { readError: errorMessage(exported.reason) } : {}),
     };
   });
@@ -282,11 +302,17 @@ async function readRunResult(taskRunId: string | undefined, failed = false) {
 const LAST_RUN_PAGE_SIZE = 25;
 const SUCCESSFUL_RESULT_STATES = new Set(['SUCCESS', 'SUCCESS_WITH_FAILURES']);
 
-type ListRunsRequest = Parameters<WorkspaceClient['jobs']['listRuns']>[0];
+type ListRunsQuery = {
+  active_only?: boolean;
+  completed_only?: boolean;
+  expand_tasks?: boolean;
+  limit: number;
+  page_token?: string;
+};
 
 async function collectVisibleRuns(
   req: Request,
-  options: Omit<ListRunsRequest, 'job_id'>,
+  options: ListRunsQuery,
   isComplete: (visible: Record<string, unknown>[]) => boolean
 ): Promise<VisibleRunPage> {
   return scanVisibleRuns({
@@ -294,15 +320,7 @@ async function collectVisibleRuns(
     // The SDK iterator consumes page tokens internally; use its authenticated transport to
     // return a continuation when this request's scan budget is exhausted.
     readPage: (pageToken) =>
-      wsClient()
-        .toLegacyWorkspaceClient()
-        .apiClient.request({
-          path: '/api/2.2/jobs/runs/list',
-          method: 'GET',
-          headers: new Headers({ Accept: 'application/json' }),
-          raw: false,
-          query: { ...options, job_id: Number(JOB_ID), page_token: pageToken },
-        }),
+      readWorkspaceJson('/api/2.2/jobs/runs/list', { ...options, job_id: JOB_ID, page_token: pageToken }),
     accessible: (run) => accessibleRun(run, req, true),
     isComplete,
   });
@@ -460,11 +478,10 @@ await createApp({
         manifest: () => loadManifest(true),
         viewer: requestViewer,
         notebookPath: async () => {
-          const job = await wsClient().jobs.get({ job_id: Number(JOB_ID) });
-          const tasks = job.settings?.tasks;
-          return tasks?.length === 1 ? tasks[0].notebook_task?.notebook_path : undefined;
+          const paths = jobNotebookPaths(await readJob());
+          return paths.length === 1 ? paths[0] : undefined;
         },
-        getRun: (run_id) => wsClient().jobs.getRun({ run_id }),
+        getRun: readRun,
         readPayload: readRunOutputPayload,
         store: appKitOutputFileStore,
         report: (error) => console.error('Output file download failed', error),
@@ -490,7 +507,7 @@ await createApp({
             res.json({ manifest: publicManifest, runnable: false, notRunnableReason: 'noJob' });
             return;
           }
-          const runnable = isPublishedRunner(manifest.runner, await wsClient().jobs.get({ job_id: Number(JOB_ID) }));
+          const runnable = isPublishedRunner(manifest.runner, await readJob());
           res.json({ manifest: publicManifest, runnable, ...(runnable ? {} : { notRunnableReason: 'updating' }) });
         } catch (err) {
           console.error(err);
@@ -587,12 +604,12 @@ await createApp({
             res.status(409).json({ error: 'This app has no runtime App ID, so it cannot attribute Job runs.' });
             return;
           }
-          if (!isPublishedRunner(manifest.runner, await wsClient().jobs.get({ job_id: Number(JOB_ID) }))) {
+          if (!isPublishedRunner(manifest.runner, await readJob())) {
             res.status(409).json({ error: APP_UPDATING_MESSAGE });
             return;
           }
-          const attribution = await runAttribution(req, APP_ID, (token) =>
-            createWorkspaceClient({ host: wsClient().config.host, token }).currentUser.me()
+          const attribution = await runAttribution(req, APP_ID, async (token) =>
+            createWorkspaceClient({ host: await wsClient().getHost(), token }).currentUser.me({})
           );
           const userName = attribution?._lb_app_user_email;
           if (!attribution || !userName) {
@@ -611,13 +628,15 @@ await createApp({
             return;
           }
 
-          // Writes MUST NEVER BE retried; replaying runNow can start duplicate compute.
+          // The SDK can retry transient responses. Reuse the submission ID so those attempts
+          // cannot start duplicate compute; the browser does not replay submissions.
           resolved.params[APP_REVISION_PARAM] = manifestRevision(manifest);
           const run = await wsClient().jobs.runNow({
-            job_id: Number(JOB_ID),
-            job_parameters: { ...resolved.params, ...attribution },
+            jobId: BigInt(JOB_ID),
+            idempotencyToken: attribution._lb_app_submission_id,
+            jobParameters: { ...resolved.params, ...attribution },
           });
-          const jobRunId = idString(run?.run_id);
+          const jobRunId = idString(run?.runId);
           if (jobRunId === undefined) {
             res.status(502).json({ error: 'The platform accepted the request but returned no run id.' });
             return;
@@ -632,25 +651,25 @@ await createApp({
       app.get('/api/designer/run/:jobRunId', async (req, res) => {
         const found = await readViewerRun(req, res);
         if (found === undefined) return;
-        const { jobRunId, run, visibleRun } = found;
+        const { jobRunId, run } = found;
 
-        const lifeCycleState = run.state?.life_cycle_state;
-        const resultState = run.state?.result_state;
+        const lifeCycleState = lifeCycleStateOf(run);
+        const resultState = resultStateOf(run);
         // A run carrying a result_state has finished even if its lifecycle value is absent or one
         // this list does not know yet, so treat that as terminal rather than polling it forever.
         const terminal =
           (lifeCycleState != null && TERMINAL_LIFE_CYCLE_STATES.has(lifeCycleState)) || resultState != null;
         const snapshot = {
           jobRunId,
-          taskRunId: idString(run.tasks?.[0]?.run_id),
+          taskRunId: summarizeLastRun(run)?.taskRunId,
           lifeCycleState,
           resultState,
-          stateMessage: run.state?.state_message,
+          stateMessage: isRecord(run.state) ? nonEmptyString(run.state.state_message) : undefined,
           setupDurationMs: run.setup_duration,
           executionDurationMs: run.execution_duration,
           runPageUrl: run.run_page_url,
           terminal,
-          ...runParameterData(visibleRun),
+          ...runParameterData(run),
         };
 
         if (!terminal) {
@@ -666,8 +685,8 @@ await createApp({
         const found = await readViewerRun(req, res);
         if (found === undefined) return;
         try {
-          // Never retry writes; polling settles cancellation from the run's own state.
-          await wsClient().jobs.cancelRun({ run_id: Number(found.jobRunId) });
+          // Polling settles cancellation from the run's own state.
+          await wsClient().jobs.cancelRun({ runId: BigInt(found.jobRunId) });
           res.json({ cancelled: true });
         } catch (err) {
           console.error(err);

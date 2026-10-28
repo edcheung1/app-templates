@@ -177,29 +177,45 @@ async function serverHarness(options = {}) {
       });
     },
     client: {
-      config: {
-        host: workspaceHost,
-        getHost: async () => new URL(workspaceHost),
-        authenticate: async (headers) => headers.set('Authorization', 'Bearer route-test-only'),
-        hostType: () => 'workspaceHost',
+      getHost: async () => workspaceHost,
+      request: async ({ method, path, query }) => {
+        assert.equal(method, 'GET');
+        switch (path) {
+          case '/api/2.2/jobs/get':
+            return Response.json({
+              settings: {
+                tasks: [
+                  { notebook_task: { notebook_path: state.notebookPath, base_parameters: manifest.runner.parameters } },
+                ],
+              },
+            });
+          case '/api/2.2/jobs/runs/get': {
+            const runId = Number(query.run_id);
+            state.reads.push(runId);
+            return Response.json(state.runs.find((run) => run.run_id === runId) ?? null);
+          }
+          case '/api/2.2/jobs/runs/list': {
+            assert.equal(query.job_id, '100');
+            const rows = query.active_only === 'true' ? [] : state.listed;
+            const offset = Number(query.page_token ?? 0);
+            const end = offset + Number(query.limit);
+            return Response.json({
+              runs: rows.slice(offset, end),
+              ...(end < rows.length ? { next_page_token: String(end) } : {}),
+            });
+          }
+          case '/api/2.0/workspace/export': {
+            state.workspaceReads.push({ path: query.path, format: query.format });
+            const content = query.path === state.notebookPath ? state.notebookSource : JSON.stringify(state.manifest);
+            return Response.json({ content: Buffer.from(content).toString('base64') });
+          }
+          default:
+            throw new Error(`Unexpected workspace request: ${path}`);
+        }
       },
       jobs: {
-        get: async () => ({
-          settings: {
-            tasks: [
-              { notebook_task: { notebook_path: state.notebookPath, base_parameters: manifest.runner.parameters } },
-            ],
-          },
-        }),
-        getRun: async ({ run_id }) => {
-          state.reads.push(run_id);
-          return state.runs.find((run) => run.run_id === run_id);
-        },
-        listRuns: async function* ({ active_only }) {
-          if (!active_only) yield* state.listed;
-        },
-        exportRun: async ({ run_id }) => {
-          state.outputReads.push(run_id);
+        exportRun: async ({ runId }) => {
+          state.outputReads.push(Number(runId));
           if (state.exportError) throw state.exportError;
           if (state.exportMissing) return { views: [] };
           const model = Buffer.from(
@@ -216,12 +232,12 @@ async function serverHarness(options = {}) {
           ).toString('base64');
           return { views: [{ content: `<script>__DATABRICKS_NOTEBOOK_MODEL = '${model}'</script>` }] };
         },
-        getRunOutput: async ({ run_id }) => {
-          state.taskOutputReads.push(run_id);
-          return state.taskOutput;
+        getRunOutput: async ({ runId }) => {
+          state.taskOutputReads.push(Number(runId));
+          return { ...state.taskOutput, errorTrace: state.taskOutput.error_trace };
         },
-        cancelRun: async ({ run_id }) => {
-          state.cancelled.push(run_id);
+        cancelRun: async ({ runId }) => {
+          state.cancelled.push(Number(runId));
         },
         getPermissions: async (request) => {
           state.jobCalls.push('getPermissions');
@@ -231,29 +247,10 @@ async function serverHarness(options = {}) {
         },
         runNow: async (request) => {
           state.jobCalls.push('runNow');
-          state.submissions.push(request);
-          return { run_id: 1000 };
+          state.submissions.push({ job_id: Number(request.jobId), job_parameters: request.jobParameters });
+          return { runId: 1000n };
         },
       },
-      toLegacyWorkspaceClient: () => ({
-        apiClient: {
-          request: async ({ path, query }) => {
-            assert.equal(path, '/api/2.2/jobs/runs/list');
-            assert.equal(query.job_id, 100);
-            const rows = query.active_only ? [] : state.listed;
-            const offset = Number(query.page_token ?? 0);
-            const end = offset + query.limit;
-            return { runs: rows.slice(offset, end), ...(end < rows.length ? { next_page_token: String(end) } : {}) };
-          },
-        },
-        workspace: {
-          export: async ({ path, format }) => {
-            state.workspaceReads.push({ path, format });
-            const content = path === state.notebookPath ? state.notebookSource : JSON.stringify(state.manifest);
-            return { content: Buffer.from(content).toString('base64') };
-          },
-        },
-      }),
     },
     userClient(options) {
       assert.equal(options.host, workspaceHost);
