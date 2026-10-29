@@ -11,9 +11,9 @@
   },
   "scripts": {
     "dev": "NODE_ENV=development DISABLE_REMOTE_SERVING=true tsx watch --tsconfig ./tsconfig.server.json --env-file-if-exists=./.env ./server/server.ts",
-    "test": "pnpm check:designer-plugin && node --experimental-strip-types --test tests/*.test.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "test:browser": "tsc -p tests/browser/tsconfig.json && node --experimental-strip-types --test tests/browser/*.test.ts",
-    "build": "pnpm check:designer-plugin && pnpm run build:server && pnpm run build:client",
+    "build": "pnpm run build:server && pnpm run build:client",
     "build:server": "tsc -b tsconfig.server.json && tsdown -c tsdown.server.config.ts",
     "build:client": "tsc -b tsconfig.client.json && vite build --config client/vite.config.ts",
     "start": "NODE_ENV=production node --env-file-if-exists=./.env ./dist/server.js",
@@ -21,8 +21,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --check .",
-    "format:fix": "prettier --write .",
-    "check:designer-plugin": "node scripts/check-designer-plugin.mjs"
+    "format:fix": "prettier --write ."
   },
   "dependencies": {
     "@databricks/appkit": "0.89.0",

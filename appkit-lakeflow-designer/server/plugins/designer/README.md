@@ -160,11 +160,9 @@ Its fixture replaces only the two registry URLs, allowing a pre-merge test witho
 
 For template maintenance, run `appkit add designer --force --no-register --no-resources`
 after the registry change lands (add `--allow-unverified` while the item is unverified).
-Review the source diff and commit it with dependency/lockfile changes. In the Designer template,
-record this checkout's committed item with
-`node scripts/check-designer-plugin.mjs --record /path/to/appkit-registry`; the template's offline
-source check verifies the installed files against that pin before tests and builds. Run the template's
-tests, browser checks, and production build. Advance the Designer publisher's pinned template
+Review the source diff and commit it with dependency/lockfile changes. Record the originating
+registry commit in the template's update documentation. Run the template's tests, browser checks,
+and production build. Advance the Designer publisher's pinned template
 revision and republish Apps that should receive the update. The publisher does not call
 `appkit add` at deployment time.
 

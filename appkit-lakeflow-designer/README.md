@@ -56,9 +56,7 @@ retries Job submission automatically. See the plugin's
 
 The template includes the source installed by `appkit add designer` and works with the released
 AppKit 0.89.0 packages. It does not depend on an unreleased SDK plugin or local package link.
-[designer-plugin.lock.json](./designer-plugin.lock.json) records the source commit and file hashes.
-`pnpm check:designer-plugin` verifies all installed files without network access; `test` and `build`
-run this check automatically.
+The installed source comes from [registry commit `72be6b8`](https://github.com/databricks/appkit-registry/commit/72be6b8d2d924e7c80e9196c02cc4600d57e545d).
 The registry item is unverified until reviewed by an AppKit maintainer.
 
 After a registry change lands, update the template from this directory:
@@ -69,18 +67,8 @@ pnpm exec appkit add designer --force --no-register --no-resources --allow-unver
 
 Inspect the source before using `--allow-unverified`. The command copies the plugin, installs its
 declared dependencies, and synchronizes `appkit.plugins.json`. Review and commit the source and
-lockfile together. Record the exact committed registry item used for installation, then run the
-checks below:
-
-```bash
-node scripts/check-designer-plugin.mjs --record /path/to/appkit-registry
-pnpm check:designer-plugin
-```
-
-The recording command reads the registry checkout's committed `HEAD` item and refuses source that
-differs from the installed files. Commit registry changes before recording the pin. Review the
-registry commit and generated item alongside the source-lock change. The offline check detects
-drift against that reviewed lock; it does not contact GitHub to verify provenance.
+`pnpm-lock.yaml` changes together, update the originating registry commit above, and run the
+checks below. Git records the installed plugin source; `pnpm-lock.yaml` pins its npm dependencies.
 
 During development, edits to the installed source work with `pnpm dev`; move those changes back
 to the registry and rebuild its item before merging.
