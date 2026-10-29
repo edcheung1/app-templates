@@ -1,27 +1,16 @@
 import {
   errorMessage,
-  idString,
   isRecord,
   nonEmptyString,
   positiveInt,
-  stringValues,
+  parseRunHistoryEntry,
+  type RunHistoryEntry,
+  type RunOutcome,
+  type RunSnapshot,
+  parseRunSnapshot,
+  runHistoryRoute,
+  runStatusRoute,
 } from '../../server/plugins/designer/client';
-import type { RunOutcome, RunSnapshot } from './payload';
-import { parseRunSnapshot } from './payload';
-import { runHistoryRoute, runStatusRoute } from './routes';
-
-export type RunHistoryEntry = {
-  jobRunId: string;
-  endTime?: number;
-  startTime?: number;
-  setupDurationMs?: number;
-  executionDurationMs?: number;
-  runPageUrl?: string;
-  resultState?: string;
-  lifeCycleState?: string;
-  parameters?: Record<string, string>;
-  parameterDisplayValues?: Record<string, string>;
-};
 
 export type RunHistoryState =
   | { status: 'loading' }
@@ -85,32 +74,6 @@ export function historyEntriesWithDisplayedRun(
   return [...runs.slice(0, insertionIndex), displayedRun, ...runs.slice(insertionIndex)];
 }
 
-function parseEntry(raw: unknown): RunHistoryEntry | undefined {
-  if (!isRecord(raw)) {
-    return undefined;
-  }
-  const jobRunId = idString(raw.jobRunId);
-  if (jobRunId === undefined) {
-    return undefined;
-  }
-  const parameters = stringValues(raw.parameters);
-  const parameterDisplayValues = stringValues(raw.parameterDisplayValues);
-  return {
-    jobRunId,
-    ...(positiveInt(raw.endTime) === undefined ? {} : { endTime: positiveInt(raw.endTime) }),
-    ...(positiveInt(raw.startTime) === undefined ? {} : { startTime: positiveInt(raw.startTime) }),
-    ...(positiveInt(raw.setupDurationMs) === undefined ? {} : { setupDurationMs: positiveInt(raw.setupDurationMs) }),
-    ...(positiveInt(raw.executionDurationMs) === undefined
-      ? {}
-      : { executionDurationMs: positiveInt(raw.executionDurationMs) }),
-    ...(nonEmptyString(raw.runPageUrl) === undefined ? {} : { runPageUrl: nonEmptyString(raw.runPageUrl) }),
-    ...(nonEmptyString(raw.resultState) === undefined ? {} : { resultState: nonEmptyString(raw.resultState) }),
-    ...(nonEmptyString(raw.lifeCycleState) === undefined ? {} : { lifeCycleState: nonEmptyString(raw.lifeCycleState) }),
-    ...(parameters === undefined ? {} : { parameters }),
-    ...(parameterDisplayValues === undefined ? {} : { parameterDisplayValues }),
-  };
-}
-
 export async function fetchRunHistory(
   windowSize: number,
   cursor?: string,
@@ -134,7 +97,7 @@ export async function fetchRunHistory(
     if (body.status !== 'found' || !Array.isArray(body.runs)) {
       return { status: 'unavailable', reason: 'the server returned an unreadable run history' };
     }
-    const runs = body.runs.map(parseEntry).filter((entry): entry is RunHistoryEntry => entry !== undefined);
+    const runs = body.runs.map(parseRunHistoryEntry).filter((entry): entry is RunHistoryEntry => entry !== undefined);
     return {
       status: 'found',
       runs,

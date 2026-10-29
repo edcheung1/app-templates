@@ -19,61 +19,20 @@ Per-app differences are injected at deploy time rather than baked into the sourc
   publish flow beside the runner notebook in its publisher-owned workspace folder. The server
   derives that folder from the bound job's notebook path; no shared manifest root is needed.
 
-## Run attribution and usage reporting
+## Runs and permissions
 
-Every App submission uses Jobs `job_parameters`. The server records the submitting user's
-`X-Forwarded-User` ID and `X-Forwarded-Email`, together with the runtime App ID and a unique submission
-ID. Numeric `user@workspace` ingress subjects are recorded as the user ID. When the preferred-name
-header contains only an email, the server uses the forwarded user token to read that user's profile
-and snapshot their display name. An unavailable profile falls back to the ingress email.
-Submissions without authenticated ingress identity, an ingress email or a runtime App ID are refused
-before starting a Job. These headers must come from the trusted Apps ingress in production.
+Runs execute the publisher-owned Job using its configured run-as identity. The plugin validates
+trusted Apps ingress identity and scopes history, results, cancellation, and downloads to the
+submitting viewer. Direct Jobs or UC permissions remain effective outside the App. Owners can
+report usage through `system.lakeflow.job_run_timeline`; see the plugin's
+[run attribution contract](./server/plugins/designer/README.md#run-attribution-and-usage-reporting).
 
-The server starts the saved runner Job with `runNow` and stamps every submission with a
-server-owned viewer identity. History, results, cancellation and downloads within the App require
-that identity to match the current viewer, including Apps without file inputs or outputs.
-The consumer UI keeps run access within the App. Submitting a run grants no direct Job permissions;
-independent Job permissions remain effective and can expose runs outside the App's viewer controls.
-Authors retain the Job-management link in Designer.
-
-`DATABRICKS_APP_ID` supplies the runtime App ID. The OAuth client ID fallback is specific to
-standalone runtimes whose principal shares the App UUID; App Space deployments need the explicit
-App ID for accurate attribution.
-
-The reserved parameters are `_lb_app_id`, `_lb_app_user_id`, `_lb_app_user_name`,
-`_lb_app_user_email`, `_lb_app_submission_id` and `_lb_app_parameters`. The last contains a JSON
-map of exposed Designer inputs with their labels, types and resolved values, including defaults
-and explicit empty multi-selects. File inputs report the uploaded filename; the actual execution
-parameter remains the validated UC file path. Consumer parameters cannot override `_lb_` metadata.
-Names and input labels reflect the time of submission, so republishing does not rewrite past runs.
-
-Owners can build usage reports from `system.lakeflow.job_run_timeline`, which retains job-level
-parameters. Reporting access is separate from App access, and system-table delivery is delayed.
-The publisher records run metadata; reporting views and dashboards are separately managed.
-
-## Republishing and concurrent runs
-
-Each publication records an immutable `runner-<sha256>.designer.py` notebook and a snapshot of all
-execution defaults in `designerApp.json`. The server compares this snapshot with the bound Job
-before accepting a submission and passes the complete snapshot with each run. Hidden defaults
-stay on the server. A revision check in the first notebook cell rejects requests racing changes to
-workflow code or parameter defaults before any workflow code executes.
-
-Republishing prepares volume grants and the template before changing the active runner. New
-submissions pause with an “App is updating” message until the manifest and Job agree; existing runs
-continue. A failure between changing the Job and updating the manifest keeps submissions paused
-until the author retries. This protocol detects mixed configurations; it does not serialize
-concurrent publishers.
-
-Ordinary Apps allow five concurrent runs. Apps with file Outputs allow one run at a time to protect
-shared append and workbook updates. Both explicitly enable Jobs queueing. The UI retains an
-accepted run through temporary status failures, retries reads, and exposes cancellation failures
-so the consumer can retry. The browser never retries Job submission automatically. SDK transport
-retries reuse the submission ID as the Jobs idempotency token to avoid starting duplicate runs.
-
-History filters every run by viewer and returns a continuation cursor when a bounded scan has not
-reached the end. “Load older runs” continues beyond pages filled by other viewers. The last-successful
-run search follows those cursors automatically.
+Republishing pauses new submissions until the manifest and runner agree. Existing runs continue,
+and the UI retains an accepted run through temporary status failures. Ordinary Apps allow five
+concurrent runs; Apps with file Outputs allow one to protect shared append/workbook updates.
+History's “Load older runs” continues beyond pages belonging to other viewers. The browser never
+retries Job submission automatically. See the plugin's
+[publication contract](./server/plugins/designer/README.md#republishing-and-concurrent-runs).
 
 ## Layout
 
@@ -83,7 +42,7 @@ run search follows those cursors automatically.
   The plugin owns manifest loading, Job orchestration, output decoding, authorization, and file
   transfers. Its backend regression tests live in the registry repository.
 - `server/plugins/designer/client.ts` — browser-safe manifest schemas, types, and shared helpers.
-  Client code imports this barrel; the server entry must stay out of browser bundles.
+  It includes response parsers and route helpers. Client code imports this barrel; the server entry must stay out of browser bundles.
 - `client/` — the React client, built by Vite to `client/dist`.
 - `app.yaml` — start command and env bindings (`command: ['pnpm', 'run', 'start']`).
 - `tsconfig.shared.json` / `tsconfig.server.json` / `tsconfig.client.json` — a strict shared base
@@ -97,7 +56,9 @@ run search follows those cursors automatically.
 
 The template includes the source installed by `appkit add designer` and works with the released
 AppKit 0.89.0 packages. It does not depend on an unreleased SDK plugin or local package link.
-The installed source matches [registry commit `a0cb0f9`](https://github.com/edcheung1/appkit-registry/commit/a0cb0f921677b09b277b2fd619f0a40bafb22f59).
+[designer-plugin.lock.json](./designer-plugin.lock.json) records the source commit and file hashes.
+`pnpm check:designer-plugin` verifies all installed files without network access; `test` and `build`
+run this check automatically.
 The registry item is unverified until reviewed by an AppKit maintainer.
 
 After a registry change lands, update the template from this directory:
@@ -108,8 +69,21 @@ pnpm exec appkit add designer --force --no-register --no-resources --allow-unver
 
 Inspect the source before using `--allow-unverified`. The command copies the plugin, installs its
 declared dependencies, and synchronizes `appkit.plugins.json`. Review and commit the source and
-lockfile together, then run the checks below. During development, edits to the installed source
-work with `pnpm dev`; move those changes back to the registry and rebuild its item before merging.
+lockfile together. Record the exact committed registry item used for installation, then run the
+checks below:
+
+```bash
+node scripts/check-designer-plugin.mjs --record /path/to/appkit-registry
+pnpm check:designer-plugin
+```
+
+The recording command reads the registry checkout's committed `HEAD` item and refuses source that
+differs from the installed files. Commit registry changes before recording the pin. Review the
+registry commit and generated item alongside the source-lock change. The offline check detects
+drift against that reviewed lock; it does not contact GitHub to verify provenance.
+
+During development, edits to the installed source work with `pnpm dev`; move those changes back
+to the registry and rebuild its item before merging.
 
 Publishing uses the plugin files already committed in the pinned template revision. It does not
 fetch the registry or execute `appkit add`. To roll out a plugin change, advance the publisher's
@@ -149,10 +123,9 @@ this template without a workspace; they do not replace deployed Jobs, ingress an
 
 The `pnpm-lock.yaml` lockfile and `pnpm-workspace.yaml` overrides pin compatible security fixes,
 including AppKit's YAML, DOMPurify and ECharts dependencies. Recheck these overrides when upgrading
-AppKit. The release dependency above must be resolved before this migration can build from a clean
-install. The workspace file also allows esbuild's install script and disables the informational
-AppKit and protobufjs postinstall scripts. Backend dependencies such as Express, YAML, and Zod
-come from AppKit; the template does not import them directly.
+AppKit. The workspace file also allows esbuild's install script and disables the informational
+AppKit and protobufjs postinstall scripts. The registry item declares its YAML and Zod dependencies
+explicitly; Express comes from AppKit.
 
 Zod, qs and the affected OpenTelemetry packages are pinned to security fixes. Vite 7.3.7 replaces
 the rolldown-vite alias because Rolldown incorrectly removes an optional-chain guard in Zod's
@@ -250,7 +223,7 @@ the Job. Earlier warnings and any completed outputs remain available when a late
 
 The server reads existing `[guardrails]` markers from annotated cells' stdout and error details.
 It deduplicates by operator and check, with failures taking precedence. Operator names come from
-the run's own YAML annotations. The Designer plugin parses those annotations using AppKit's YAML dependency.
+the run's own YAML annotations. The Designer plugin parses those annotations using its declared YAML dependency.
 Failed runs also read Jobs task errors as a fallback; when the export cannot identify the operator,
 the summary labels the check `Guardrails` rather than guessing its name. The actual task error is
 shown ahead of the generic Job state message. All messages render as plain text.
@@ -333,7 +306,7 @@ share Designer's existing `enableDesignerApps` gate.
 The author selects a UC volume in Designer; publishing binds it without creating another volume.
 The existing `designer_uploads` App resource with `WRITE_VOLUME` gives the app service
 principal read/write access; the runner job's run-as principal also needs read access. Uploads
-use the Designer plugin's private Files connector adapters. The plugin scopes each request to the
+use the Designer plugin's shared workspace client. The plugin scopes each request to the
 validated manifest; it does not create nested AppKit instances or expose generic file-browser routes.
 Upload, bounded sidecar reads, metadata, directory creation, and deletion use the App service principal.
 No operator code changes are needed.
@@ -365,7 +338,7 @@ for selection; viewers select a local file for each browser session. Manual clea
 Uploads use `<storage.path>/uploads/<viewer-hash>/<parameter-hash>/<upload-id>/<filename>`.
 
 Uploaded filenames in last-run and selected-run parameter summaries are download links.
-Downloads stream the original bytes through AppKit Files after checking the authenticated viewer,
+Downloads stream the original bytes through the plugin's workspace client after checking the authenticated viewer,
 current file parameter, completion record and recorded size. They do not start a Job, copy files
 or delete the upload. Changing the upload root or removing the file parameter makes old links
 unavailable; retained files still require volume-owner cleanup. Interrupted downloads can be retried.
@@ -401,7 +374,7 @@ automatic reloads. This adds no background polling or automatic Job submissions.
 
 `pnpm test` covers the template's parameter controls, browser manifest/result parsing, visibility,
 file links, upload-cache invalidation, tables, charts, and run restoration. `pnpm run test:browser`
-exercises the actual React UI in Chrome. AppKit owns the backend tests for storage, authorization,
+exercises the actual React UI in Chrome. The registry owns the backend and shared-contract tests for storage, authorization,
 streaming transfers, notebook decoding, and Job orchestration; see its Designer plugin test suite.
 
 Actual Apps ingress, UC provisioning/grants, and Jobs execution still require deployed validation,
@@ -466,7 +439,7 @@ update preserves historical downloads when the file policy still matches. Change
 requires another App run.
 Treat generated runner files as immutable deployment artifacts; edit in Designer and republish.
 
-The App server streams UC bytes through the Designer plugin's private Files connector adapters
+The App server streams UC bytes through the Designer plugin's shared workspace client
 using its service principal.
 No storage credentials or presigned URLs reach the browser. No new Job, SQL warehouse, second file,
 staging volume, export cache, or deletion is involved. Upload storage is not required for file-only Apps.

@@ -17,7 +17,7 @@ import { getCoreRowModel, getFilteredRowModel, getSortedRowModel, useReactTable 
 import { useMemo } from 'react';
 
 import { categorize, formatCell, isNumericCategory } from './dataTypes';
-import type { OkPayload, SchemaField } from './payload';
+import type { OkPayload, SchemaField } from '../../server/plugins/designer/client';
 import { ResultFooter } from './ResultFooter';
 import { createResultColumns, createResultFilter } from './resultTable';
 

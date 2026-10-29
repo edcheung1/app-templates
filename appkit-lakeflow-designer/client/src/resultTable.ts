@@ -1,7 +1,7 @@
 import type { ColumnDef, FilterFn } from '@tanstack/react-table';
 
 import { categorize, formatCell, isNumericCategory } from './dataTypes';
-import type { ResultRow, SchemaField } from './payload';
+import type { ResultRow, SchemaField } from '../../server/plugins/designer/client';
 
 function compareDecimalStrings(left: string, right: string): number | undefined {
   const pattern = /^([+-]?)(\d+)(?:\.(\d+))?$/;

@@ -5,7 +5,6 @@ import { after, before, mock, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'tsdown';
 import * as config from '../server/plugins/designer/client.ts';
-import * as fileFormats from '../server/plugins/designer/client.ts';
 
 let appConfig, fileUpload, outputDirectory;
 
@@ -173,102 +172,14 @@ test('validates versioned storage and never initializes a file input with the au
   }
 });
 
-test('file-output manifest scopes are explicit without requiring upload storage', () => {
-  const fileManifest = {
-    ...manifest,
-    storage: undefined,
-    parameters: [],
-    blocks: [{ ...manifest.blocks[0], fileOutput: { volumes: ['main.default.files', 'main.default.other'] } }],
-  };
-  const parsed = appConfig.parseAppManifest(fileManifest);
-  assert.deepEqual(parsed.blocks[0].fileOutput, fileManifest.blocks[0].fileOutput);
-  assert.equal(parsed.storage, undefined);
-  for (const fileOutput of [null, {}, { volumes: [] }, { volumes: ['bad'] }, { volumes: ['main.default.files/..'] }]) {
-    assert.equal(
-      appConfig.parseAppManifest({ ...fileManifest, blocks: [{ ...fileManifest.blocks[0], fileOutput }] }),
-      undefined
-    );
-  }
-});
-
-test('malformed file-output identities cannot silently downgrade an App to preview-only behavior', () => {
-  const preview = manifest.blocks[0];
-  const file = {
-    type: 'output',
-    id: 'file',
-    nodeId: 'output_0',
-    port: 'result',
-    fileOutput: { volumes: ['main.apps.files'] },
-  };
-  for (const blocks of [
-    [preview, { ...file, id: undefined }],
-    [preview, { ...file, id: '' }],
-    [preview, { ...file, id: ' ' }],
-    [preview, { ...file, nodeId: undefined }],
-    [preview, { ...file, nodeId: '' }],
-    [preview, { ...file, id: preview.id }],
-    [{ ...file, id: preview.id }, preview],
-    [preview, file, file],
-    [preview, { ...file, type: 'markdown', text: 'Not a file output' }],
-  ]) {
-    assert.equal(appConfig.parseAppManifest({ ...manifest, storage: undefined, parameters: [], blocks }), undefined);
-  }
-  const ordinary = appConfig.parseAppManifest({
-    ...manifest,
-    storage: undefined,
-    parameters: [],
-    blocks: [preview, { ...preview, id: '' }, preview],
-  });
-  assert.equal(ordinary.blocks.length, 1);
-});
-
 test('rejects mismatched uploads before network transfer, including drag-and-drop selections', async () => {
   const csv = new File(['a,b\n1,2\n'], 'data.csv');
   assert.match(fileUpload.validateUpload(csv, ['excel']), /expects Excel/);
   await assert.rejects(fileUpload.uploadFile('path', csv, ['excel']), /expects Excel/);
   assert.equal(fileUpload.validateUpload(csv, ['csv']), undefined);
   assert.match(fileUpload.validateUpload(new File([], 'empty.xlsx'), ['excel']), /non-empty/);
-  assert.equal(fileFormats.uploadAccept(['excel']), '.xls,.xlsx');
-});
-
-test('validates supported extensions case-insensitively without inferring formats or trusting MIME types', () => {
-  for (const [format, filename] of [
-    ['excel', 'DATA.XLSX'],
-    ['excel', 'legacy.xls'],
-    ['csv', 'data.tsv'],
-    ['csv', 'data.CSV.GZ'],
-    ['json', 'data.jsonl'],
-    ['json', 'data.ndjson.bz2'],
-    ['parquet', 'part.parquet'],
-    ['avro', 'part.avro'],
-    ['orc', 'part.orc'],
-    ['xml', 'data.xml'],
-    ['pdf', 'data.pdf'],
-  ])
-    assert.equal(fileFormats.validateFileFormat(filename, [format]), undefined);
-  for (const filename of ['data.csv', 'data.xlsx.csv', 'data', 'data.xlsx.gz'])
-    assert.match(fileFormats.validateFileFormat(filename, ['excel']), /expects Excel/);
-  assert.match(fileFormats.validateFileFormat('data.xlsx', ['csv']), /expects CSV/);
   assert.match(
     fileUpload.validateUpload(new File(['a'], 'data.csv', { type: 'application/vnd.ms-excel' }), ['excel']),
     /expects Excel/
   );
-  for (const formats of [undefined, [], ['text'], ['binaryfile'], ['custom.provider'], ['constructor']]) {
-    assert.equal(fileFormats.validateFileFormat('no-extension', formats), undefined);
-    assert.equal(fileFormats.uploadAccept(formats), undefined);
-  }
-  assert.match(fileFormats.validateFileFormat('data.csv', ['csv', 'excel']), /expects Excel/);
-  assert.equal(fileFormats.uploadAccept(['csv', 'text']), fileFormats.uploadAccept(['csv']));
-  assert.equal(fileFormats.uploadAccept(['csv', 'excel']), undefined);
-});
-
-test('preserves file format constraints through the browser manifest and rejects malformed metadata', () => {
-  const configured = { ...manifest, parameters: [{ ...fileParameter, fileFormats: ['excel'] }] };
-  assert.deepEqual(appConfig.parseAppManifest(configured).parameters[0].fileFormats, ['excel']);
-  for (const invalid of ['excel', null, [1], [''], ['EXCEL']]) {
-    assert.equal(
-      appConfig.parseAppManifest({ ...manifest, parameters: [{ ...fileParameter, fileFormats: invalid }] }),
-      undefined
-    );
-  }
 });

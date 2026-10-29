@@ -1,5 +1,5 @@
 import { Badge } from '@databricks/appkit-ui/react';
-import type { OkPayload } from './payload';
+import type { OkPayload } from '../../server/plugins/designer/client';
 
 const formatCount = (n: number) => n.toLocaleString();
 

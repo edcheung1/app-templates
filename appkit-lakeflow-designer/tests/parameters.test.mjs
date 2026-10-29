@@ -6,15 +6,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'tsdown';
+import { parseRunSnapshot } from '../server/plugins/designer/client.ts';
 
-let outputDirectory, ParameterForm, parseAppManifest, initialValuesFor, parseRunSnapshot;
+let outputDirectory, ParameterForm, parseAppManifest, initialValuesFor;
 before(async () => {
   outputDirectory = await mkdtemp(fileURLToPath(new URL('../.parameter-tests-', import.meta.url)));
   await build({
     entry: {
       ParameterForm: 'client/src/ParameterForm.tsx',
       appConfig: 'client/src/appConfig.ts',
-      payload: 'client/src/payload.ts',
     },
     config: false,
     tsconfig: 'tsconfig.client.json',
@@ -25,7 +25,6 @@ before(async () => {
   });
   ({ ParameterForm } = await import(pathToFileURL(join(outputDirectory, 'ParameterForm.mjs')).href));
   ({ parseAppManifest, initialValuesFor } = await import(pathToFileURL(join(outputDirectory, 'appConfig.mjs')).href));
-  ({ parseRunSnapshot } = await import(pathToFileURL(join(outputDirectory, 'payload.mjs')).href));
 });
 after(async () => {
   if (outputDirectory) await rm(outputDirectory, { recursive: true });

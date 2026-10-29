@@ -1,13 +1,16 @@
-import { type AppParameter, UPLOAD_REFERENCE } from '../../server/plugins/designer/client';
+import {
+  type AppParameter,
+  UPLOAD_REFERENCE,
+  type LastRunSummary,
+  uploadDownloadRoute,
+} from '../../server/plugins/designer/client';
 import { relative } from './relativeTime';
 import { useNow } from './useNow';
 import { Badge } from '@databricks/appkit-ui/react';
 import type { ReactNode } from 'react';
 import { createContext, Fragment, useContext, useMemo, useState } from 'react';
 
-import type { LastRunSummary } from './lastRun';
 import { labelFor } from './parameterLabels';
-import { uploadDownloadRoute } from './routes';
 
 export type LastRunVariant = 'last' | 'superseded' | 'justFinished' | 'historical';
 

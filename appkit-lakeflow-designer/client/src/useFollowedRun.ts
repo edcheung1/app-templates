@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 
-import type { ActiveRun } from './lastRun';
+import {
+  type ActiveRun,
+  parseRunSnapshot,
+  type RunOutcome,
+  type RunSnapshot,
+  runStatusRoute,
+} from '../../server/plugins/designer/client';
 import type { ConsumerRunPhase } from './landingPlan';
 import { FOLLOWED_RUN_NO_OUTCOME_REASON, shouldFollowActiveRun, shouldRetainSettledFollowedRun } from './landingPlan';
-import { parseRunSnapshot, type RunOutcome, type RunSnapshot } from './payload';
-import { runStatusRoute } from './routes';
+
 import { POLL_INTERVAL_MS } from './useDesignerRun';
 
 export type FollowedRunState = {

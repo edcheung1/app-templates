@@ -1,5 +1,5 @@
 import { Button } from '@databricks/appkit-ui/react';
-import type { RunSnapshot } from './payload';
+import type { RunSnapshot } from '../../server/plugins/designer/client';
 
 type Stage = { key: string; label: string; dotClass: string };
 

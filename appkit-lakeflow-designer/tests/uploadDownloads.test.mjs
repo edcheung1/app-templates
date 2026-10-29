@@ -6,14 +6,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'tsdown';
+import { uploadDownloadRoute } from '../server/plugins/designer/client.ts';
 
-let outputDirectory, uploadDownloadRoute, FileParameterControl, LastRunLabel;
+let outputDirectory, FileParameterControl, LastRunLabel;
 
 before(async () => {
   outputDirectory = await mkdtemp(fileURLToPath(new URL('../.upload-download-tests-', import.meta.url)));
   await build({
     entry: {
-      routes: 'client/src/routes.ts',
       FileParameterControl: 'client/src/FileParameterControl.tsx',
       LastRunLabel: 'client/src/LastRunLabel.tsx',
     },
@@ -24,7 +24,6 @@ before(async () => {
     outExtensions: () => ({ js: '.mjs' }),
     logLevel: 'silent',
   });
-  ({ uploadDownloadRoute } = await import(pathToFileURL(join(outputDirectory, 'routes.mjs')).href));
   ({ FileParameterControl } = await import(pathToFileURL(join(outputDirectory, 'FileParameterControl.mjs')).href));
   ({ LastRunLabel } = await import(pathToFileURL(join(outputDirectory, 'LastRunLabel.mjs')).href));
 });

@@ -4,8 +4,8 @@ import {
   isValidMultiselectValue,
   errorMessage,
   isRecord,
+  CONFIG_ROUTE,
 } from '../../server/plugins/designer/client';
-import { CONFIG_ROUTE } from './routes';
 
 export type NotRunnableReason = 'noManifest' | 'noJob' | 'updating';
 

@@ -5,8 +5,8 @@ import {
   UPLOAD_UNAVAILABLE,
   validateFileFormat,
   isRecord,
+  uploadsRoute,
 } from '../../server/plugins/designer/client';
-import { uploadsRoute } from './routes';
 
 interface UploadChoice {
   reference: string;

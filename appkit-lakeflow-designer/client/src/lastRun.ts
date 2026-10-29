@@ -1,25 +1,15 @@
-import { errorMessage, idString, isRecord, positiveInt, stringValues } from '../../server/plugins/designer/client';
-import type { RunOutcome } from './payload';
-import { parseRunOutcome } from './payload';
-import { LAST_RUN_ROUTE } from './routes';
-
-export type LastRunSummary = {
-  jobRunId: string;
-  taskRunId?: string;
-  endTime?: number;
-  startTime?: number;
-  setupDurationMs?: number;
-  executionDurationMs?: number;
-  runPageUrl?: string;
-  resultState?: string;
-};
-
-export type ActiveRun = {
-  run: LastRunSummary;
-  parameters?: Record<string, string>;
-  parameterDisplayValues?: Record<string, string>;
-  lifeCycleState?: string;
-};
+import {
+  errorMessage,
+  isRecord,
+  stringValues,
+  parseLastRunSummary,
+  parseActiveRun,
+  type LastRunSummary,
+  type ActiveRun,
+  type RunOutcome,
+  parseRunOutcome,
+  LAST_RUN_ROUTE,
+} from '../../server/plugins/designer/client';
 
 export type LastRunState =
   | { status: 'loading' }
@@ -34,48 +24,6 @@ export type LastRunState =
       result: RunOutcome;
       active?: ActiveRun;
     };
-
-function parseSummary(raw: unknown): LastRunSummary | undefined {
-  if (!isRecord(raw)) {
-    return undefined;
-  }
-  const jobRunId = idString(raw.jobRunId);
-  if (jobRunId === undefined) {
-    return undefined;
-  }
-  return {
-    jobRunId,
-    ...(idString(raw.taskRunId) === undefined ? {} : { taskRunId: idString(raw.taskRunId) }),
-    ...(positiveInt(raw.endTime) === undefined ? {} : { endTime: positiveInt(raw.endTime) }),
-    ...(positiveInt(raw.startTime) === undefined ? {} : { startTime: positiveInt(raw.startTime) }),
-    ...(positiveInt(raw.setupDurationMs) === undefined ? {} : { setupDurationMs: positiveInt(raw.setupDurationMs) }),
-    ...(positiveInt(raw.executionDurationMs) === undefined
-      ? {}
-      : { executionDurationMs: positiveInt(raw.executionDurationMs) }),
-    ...(typeof raw.runPageUrl === 'string' && raw.runPageUrl !== '' ? { runPageUrl: raw.runPageUrl } : {}),
-    ...(typeof raw.resultState === 'string' && raw.resultState !== '' ? { resultState: raw.resultState } : {}),
-  };
-}
-
-function parseActive(raw: unknown): ActiveRun | undefined {
-  if (!isRecord(raw)) {
-    return undefined;
-  }
-  const run = parseSummary(raw.run);
-  if (run === undefined) {
-    return undefined;
-  }
-  const parameters = stringValues(raw.parameters);
-  const parameterDisplayValues = stringValues(raw.parameterDisplayValues);
-  return {
-    run,
-    ...(parameters === undefined ? {} : { parameters }),
-    ...(parameterDisplayValues === undefined ? {} : { parameterDisplayValues }),
-    ...(typeof raw.lifeCycleState === 'string' && raw.lifeCycleState !== ''
-      ? { lifeCycleState: raw.lifeCycleState }
-      : {}),
-  };
-}
 
 export async function fetchLastRun(signal?: AbortSignal): Promise<LastRunState> {
   const seen = new Set<string>();
@@ -96,7 +44,7 @@ export async function fetchLastRun(signal?: AbortSignal): Promise<LastRunState> 
       if (body.status === 'noJob') {
         return { status: 'noJob' };
       }
-      active = parseActive(body.active) ?? active;
+      active = parseActiveRun(body.active) ?? active;
       if (body.status === 'searching') {
         if (typeof body.nextPageToken !== 'string' || !body.nextPageToken || seen.has(body.nextPageToken)) {
           return { status: 'unavailable', reason: 'the server could not continue searching run history' };
@@ -111,7 +59,7 @@ export async function fetchLastRun(signal?: AbortSignal): Promise<LastRunState> 
       if (body.status === 'unavailable') {
         return { status: 'unavailable', reason: typeof body.reason === 'string' ? body.reason : 'unknown reason' };
       }
-      const run = parseSummary(body.run);
+      const run = parseLastRunSummary(body.run);
       const result = parseRunOutcome(body.result);
       if (body.status !== 'found' || run === undefined || result === undefined) {
         return { status: 'unavailable', reason: 'the server returned an unreadable last run' };

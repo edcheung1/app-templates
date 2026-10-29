@@ -3,10 +3,14 @@ import type {
   AppManifestBlock,
   AppMarkdownBlock,
   AppOutputBlock,
+  LastRunSummary,
+  RunHistoryEntry,
+  MatchedOutput,
+  RunOutcome,
+  RunSnapshot,
 } from '../../server/plugins/designer/client';
-import type { LastRunState, LastRunSummary } from './lastRun';
-import type { RunHistoryEntry, SelectedRunState } from './runHistory';
-import type { MatchedOutput, RunOutcome, RunSnapshot } from './payload';
+import type { LastRunState } from './lastRun';
+import type { SelectedRunState } from './runHistory';
 import type { RunState } from './useDesignerRun';
 import type { FollowedRunState } from './useFollowedRun';
 

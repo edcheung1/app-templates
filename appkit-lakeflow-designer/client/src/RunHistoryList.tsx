@@ -9,7 +9,8 @@ import {
 } from '@databricks/appkit-ui/react';
 
 import { relative } from './relativeTime';
-import type { RunHistoryEntry, RunHistoryState } from './runHistory';
+import type { RunHistoryState } from './runHistory';
+import type { RunHistoryEntry } from '../../server/plugins/designer/client';
 import { historyEntriesWithDisplayedRun } from './runHistory';
 
 function OutcomeBadge({ resultState }: { resultState?: string }) {

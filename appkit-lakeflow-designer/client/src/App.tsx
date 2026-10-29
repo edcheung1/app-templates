@@ -11,6 +11,13 @@ import {
   type AppParameter,
   UPLOAD_REFERENCE,
   APP_UPDATING_MESSAGE,
+  type ActiveRun,
+  type LastRunSummary,
+  type RunHistoryEntry,
+  type MatchedOutput,
+  type OkPayload,
+  type RunOutcome,
+  type RunSnapshot,
 } from '../../server/plugins/designer/client';
 import { ActiveRunBanner } from './ActiveRunBanner';
 import { GuardrailSummary } from './GuardrailSummary';
@@ -28,7 +35,7 @@ import type { PublishedChartRefusal } from './chartTranslation';
 import { describePublishedChartRefusal, translatePublishedChart } from './chartTranslation';
 import type { LandingSection } from './landingPlan';
 import { FOLLOWED_RESULT_AVAILABLE_OFFER, planLandingArea } from './landingPlan';
-import type { ActiveRun, LastRunState, LastRunSummary } from './lastRun';
+import type { LastRunState } from './lastRun';
 import { fetchLastRun } from './lastRun';
 import type { LastRunVariant } from './LastRunLabel';
 import { LastRunLabel, RunParametersDisclosureProvider } from './LastRunLabel';
@@ -37,7 +44,7 @@ import { useNow } from './useNow';
 import { ParameterForm } from './ParameterForm';
 import { LazyOutputChart, preloadOutputChart } from './renderersLazy';
 import { RunHistorySelect } from './RunHistoryList';
-import type { RunHistoryEntry, RunHistoryState, SelectedRunState } from './runHistory';
+import type { RunHistoryState, SelectedRunState } from './runHistory';
 import {
   RUN_HISTORY_FIRST_WINDOW,
   fetchRunHistory,
@@ -53,7 +60,6 @@ import { ThemeToggle } from './ThemeToggle';
 import { useDesignerRun } from './useDesignerRun';
 import { useFollowedRun } from './useFollowedRun';
 import { OutputHtml } from './OutputHtml';
-import type { MatchedOutput, OkPayload, RunOutcome, RunSnapshot } from './payload';
 
 import {
   hasWrittenFiles,

@@ -4,7 +4,9 @@ import type { RouteConfig } from '@databricks/appkit/dist/shared/src/plugin';
 import { format } from 'node:util';
 
 import { createWorkspaceClient, type IAppRouter, type ITelemetry, SeverityNumber } from '@databricks/appkit';
-import { appManifestSchema, isReservedParameter, type AppManifest, type AppOutputBlock } from '../shared/appManifest';
+import { isReservedParameter, type AppOutputBlock } from '../shared/appManifest';
+import type { RunSummary } from '../shared/runSummary';
+import { createManifestLoader, jobNotebookPaths } from './manifest';
 import { APP_REVISION_PARAM } from '../shared/fileOutputs';
 import { APP_UPDATING_MESSAGE, isPublishedRunner } from '../shared/publishedRunner';
 import { UPLOAD_REFERENCE } from '../shared/storageConfig';
@@ -23,25 +25,8 @@ import { isLegacyExportRun, manifestRevision } from './runRevision';
 import { registerUploadRoutes } from './uploads';
 import { createUploadStore } from './uploadStore';
 
-// Publishing writes the manifest beside the runner notebook in the app's publisher-owned folder, outside
-// the git-backed source and client/dist, so it is never served publicly.
-const MANIFEST_FILENAME = 'designerApp.json';
 // SKIPPED and INTERNAL_ERROR are terminal even when no task ran.
 const TERMINAL_LIFE_CYCLE_STATES = new Set(['TERMINATED', 'SKIPPED', 'INTERNAL_ERROR']);
-
-type RunSummary = {
-  jobRunId: string;
-  taskRunId?: string;
-  endTime?: number;
-  startTime?: number;
-  setupDurationMs?: number;
-  executionDurationMs?: number;
-  runPageUrl?: string;
-  resultState?: string;
-  lifeCycleState?: string;
-  parameters?: Record<string, string>;
-  parameterDisplayValues?: Record<string, string>;
-};
 
 export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelemetry) {
   const JOB_ID = process.env.DATABRICKS_JOB_ID?.trim() || undefined;
@@ -52,7 +37,6 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
       severityNumber: SeverityNumber.ERROR,
       body: format(...args),
     });
-  const wsClient = () => client;
   const appKitUploadStore = (storage: Parameters<typeof createUploadStore>[1]) => createUploadStore(client, storage);
   const appKitOutputFileStore = (volume: string) => createOutputFileStore(client, volume);
 
@@ -61,7 +45,7 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
     path: string,
     query: Record<string, string | number | boolean | undefined>
   ): Promise<unknown> {
-    const response = await wsClient().request({
+    const response = await client.request({
       method: 'GET',
       path,
       query: Object.fromEntries(
@@ -75,14 +59,6 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
 
   const readJob = () => readWorkspaceJson('/api/2.2/jobs/get', { job_id: JOB_ID });
   const readRun = (runId: string | number) => readWorkspaceJson('/api/2.2/jobs/runs/get', { run_id: runId });
-
-  function jobNotebookPaths(job: unknown): (string | undefined)[] {
-    const tasks =
-      isRecord(job) && isRecord(job.settings) && Array.isArray(job.settings.tasks) ? job.settings.tasks : [];
-    return tasks.map((task: unknown) =>
-      isRecord(task) && isRecord(task.notebook_task) ? nonEmptyString(task.notebook_task.notebook_path) : undefined
-    );
-  }
 
   const READ_RETRY_ATTEMPTS = 3;
   const READ_RETRY_BACKOFF_MS = 1000;
@@ -105,78 +81,8 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
     throw lastError;
   }
 
-  // Polled run-status reads reuse the cached manifest; other routes pass forceFresh, so a republish
-  // takes effect without a redeploy.
-  let cachedManifest: AppManifest | undefined;
-  const loadManifest = async (forceFresh = false): Promise<AppManifest | undefined> => {
-    if (!forceFresh && cachedManifest !== undefined) {
-      return cachedManifest;
-    }
-    const manifest = await readManifest();
-    // A failed fresh read must not keep stale execution or file policies active.
-    if (manifest !== undefined || forceFresh) {
-      cachedManifest = manifest;
-    }
-    return manifest;
-  };
-
-  function manifestFolderFromNotebookPath(notebookPath: string): string {
-    const lastSlash = notebookPath.lastIndexOf('/');
-    return lastSlash <= 0 ? notebookPath : notebookPath.slice(0, lastSlash);
-  }
-
-  // All immutable runner revisions share the App folder, so resolve it from the bound Job once.
-  let cachedManifestFolder: string | undefined;
-
-  async function resolveManifestFolder(): Promise<string | undefined> {
-    if (cachedManifestFolder !== undefined) {
-      return cachedManifestFolder;
-    }
-    if (JOB_ID === undefined) {
-      return undefined;
-    }
-    try {
-      const notebookPath = jobNotebookPaths(await readJob()).find((path) => path !== undefined);
-      if (notebookPath === undefined) {
-        report('Could not find the runner notebook path on job', JOB_ID, 'to locate the app manifest');
-        return undefined;
-      }
-      cachedManifestFolder = manifestFolderFromNotebookPath(notebookPath);
-      return cachedManifestFolder;
-    } catch (err) {
-      report('Could not read the runner job to locate the app manifest', err);
-      return undefined;
-    }
-  }
-
-  async function readManifest() {
-    const folder = await resolveManifestFolder();
-    if (folder === undefined) {
-      return undefined;
-    }
-    const manifestPath = `${folder}/${MANIFEST_FILENAME}`;
-    try {
-      const exported = await readWorkspaceJson('/api/2.0/workspace/export', {
-        path: manifestPath,
-        format: 'SOURCE',
-      });
-      if (!isRecord(exported) || typeof exported.content !== 'string') {
-        return undefined;
-      }
-      return parseManifest(Buffer.from(exported.content, 'base64').toString('utf8'));
-    } catch (err) {
-      report('Could not read the app manifest from', manifestPath, err);
-      return undefined;
-    }
-  }
-
-  function parseManifest(raw: string): AppManifest | undefined {
-    try {
-      return appManifestSchema.safeParse(JSON.parse(raw)).data;
-    } catch {
-      return undefined;
-    }
-  }
+  const manifestLoader = createManifestLoader({ jobId: JOB_ID, readJob, readWorkspaceJson, report });
+  const loadManifest = manifestLoader.load;
 
   const requestViewer = (req: Request) => viewerKey(req.get('x-forwarded-user'), JOB_ID);
 
@@ -233,7 +139,7 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
   // The runs/export CODE view carries the displayed command results.
   async function readRunExport(taskRunId: string): Promise<unknown> {
     const exported = await retryRead(() =>
-      wsClient().jobs.exportRun({
+      client.jobs.exportRun({
         runId: BigInt(taskRunId),
         viewsToExport: 'CODE',
       })
@@ -266,7 +172,7 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
     }
     const value = Promise.allSettled([
       readRunExport(taskRunId),
-      failed ? retryRead(() => wsClient().jobs.getRunOutput({ runId: BigInt(taskRunId) })) : Promise.resolve(undefined),
+      failed ? retryRead(() => client.jobs.getRunOutput({ runId: BigInt(taskRunId) })) : Promise.resolve(undefined),
     ]).then(([exported, taskOutput]) => {
       const taskError = taskOutput.status === 'fulfilled' && isRecord(taskOutput.value) ? taskOutput.value : undefined;
       const taskErrorTexts = [taskError?.error, taskError?.errorTrace].filter(
@@ -412,13 +318,14 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
     if (!Array.isArray(run.job_parameters)) {
       return undefined;
     }
+    const currentManifest = manifestLoader.current();
     const params: Record<string, string> = {};
     const displayValues: Record<string, string> = {};
     for (const [name, value] of Object.entries(runJobParameters(run))) {
-      if (isReservedParameter(name) || !cachedManifest?.parameters.some((parameter) => parameter.name === name)) {
+      if (isReservedParameter(name) || !currentManifest?.parameters.some((parameter) => parameter.name === name)) {
         continue;
       }
-      const isFile = cachedManifest?.parameters.some(
+      const isFile = currentManifest?.parameters.some(
         (parameter) => parameter.name === name && parameter.type === 'file'
       );
       if (isFile) {
@@ -680,7 +587,7 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
           }
           const attribution = await runAttribution(req, APP_ID, async (token) =>
             createWorkspaceClient({
-              host: await wsClient().getHost(),
+              host: await client.getHost(),
               token,
             }).currentUser.me({})
           );
@@ -709,7 +616,7 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
           // The SDK can retry transient responses. Reuse the submission ID so those attempts
           // cannot start duplicate compute; the browser does not replay submissions.
           resolved.params[APP_REVISION_PARAM] = manifestRevision(manifest);
-          const run = await wsClient().jobs.runNow({
+          const run = await client.jobs.runNow({
             jobId: BigInt(JOB_ID),
             idempotencyToken: attribution._lb_app_submission_id,
             jobParameters: { ...resolved.params, ...attribution },
@@ -779,7 +686,7 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
         if (found === undefined) return;
         try {
           // Polling settles cancellation from the run's own state.
-          await wsClient().jobs.cancelRun({ runId: BigInt(found.jobRunId) });
+          await client.jobs.cancelRun({ runId: BigInt(found.jobRunId) });
           res.json({ cancelled: true });
         } catch (err) {
           report('Designer request failed: %O', err);
@@ -837,8 +744,7 @@ export function createDesignerRuntime(client: WorkspaceClient, telemetry: ITelem
   return {
     registerRoutes,
     close() {
-      cachedManifest = undefined;
-      cachedManifestFolder = undefined;
+      manifestLoader.clear();
       completedTaskOutputs.clear();
     },
   };

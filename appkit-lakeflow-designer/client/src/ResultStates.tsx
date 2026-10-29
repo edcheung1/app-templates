@@ -1,5 +1,5 @@
 import { Alert, AlertDescription, AlertTitle, Button } from '@databricks/appkit-ui/react';
-import type { ErrorPayload } from './payload';
+import type { ErrorPayload } from '../../server/plugins/designer/client';
 
 export function EmptyResult() {
   return (

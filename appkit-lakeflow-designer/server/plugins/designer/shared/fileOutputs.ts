@@ -82,6 +82,3 @@ export function isOutputFilePath(path: unknown, config: FileOutputConfig): path 
     /\.(csv|json|xlsx)$/i.test(segments.at(-1) ?? '')
   );
 }
-
-export const fileDownloadRoute = (runId: string, outputId: string, index: number) =>
-  `/api/designer/run/${encodeURIComponent(runId)}/files/${encodeURIComponent(outputId)}/${index}/download`;

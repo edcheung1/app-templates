@@ -1,21 +1,10 @@
-import {
-  isHtmlOutput,
-  DISPLAY_ROW_LIMIT,
-  summarizeResultPreview,
-  type ResultPreview,
-  type AppChartSpec,
-  MAX_OUTPUT_FILES,
-  parseFileOutputBehavior,
-  type FileOutputBehavior,
-  type WrittenFile,
-  idString,
-  isRecord,
-  nonEmptyString,
-  positiveInt,
-  stringValues,
-  parseRunDiagnostics,
-  type RunDiagnostics,
-} from '../../server/plugins/designer/client';
+import { isHtmlOutput } from './htmlOutputs.ts';
+import { DISPLAY_ROW_LIMIT, summarizeResultPreview, type ResultPreview } from './resultPreview.ts';
+import type { AppChartSpec } from './appManifest.ts';
+import { MAX_OUTPUT_FILES, parseFileOutputBehavior, type FileOutputBehavior, type WrittenFile } from './fileOutputs.ts';
+import { idString, isRecord, nonEmptyString, positiveInt, stringValues } from './values.ts';
+import { parseRunDiagnostics, type RunDiagnostics } from './guardrails.ts';
+import type { RunSummary } from './runSummary.ts';
 
 export type SchemaField = {
   name: string;
@@ -70,18 +59,20 @@ export type MatchedOutput = {
 export type RunOutcome = ({ outcome: 'outputs'; outputs: MatchedOutput[] } | { outcome: 'noPayload'; reason: string }) &
   RunDiagnostics;
 
-export type RunSnapshot = {
-  jobRunId: string;
-  taskRunId?: string;
-  lifeCycleState?: string;
-  resultState?: string;
+export type RunSnapshot = Pick<
+  RunSummary,
+  | 'jobRunId'
+  | 'taskRunId'
+  | 'lifeCycleState'
+  | 'resultState'
+  | 'setupDurationMs'
+  | 'executionDurationMs'
+  | 'runPageUrl'
+  | 'parameters'
+  | 'parameterDisplayValues'
+> & {
   stateMessage?: string;
-  setupDurationMs?: number;
-  executionDurationMs?: number;
-  runPageUrl?: string;
   terminal: boolean;
-  parameters?: Record<string, string>;
-  parameterDisplayValues?: Record<string, string>;
   result?: RunOutcome;
 };
 

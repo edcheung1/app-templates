@@ -7,7 +7,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { build } from 'tsdown';
 
-let parseRunOutcome;
+import { parseRunOutcome } from '../server/plugins/designer/client.ts';
 let parseAppManifest;
 let fetchLastRun;
 let lastSuccessfulRunEntry;
@@ -26,7 +26,6 @@ before(async () => {
   outputDirectory = await mkdtemp(fileURLToPath(new URL('../.result-tests-', import.meta.url)));
   await build({
     entry: {
-      payload: 'client/src/payload.ts',
       appConfig: 'client/src/appConfig.ts',
       ResultFooter: 'client/src/ResultFooter.tsx',
       ResultGrid: 'client/src/ResultGrid.tsx',
@@ -44,7 +43,6 @@ before(async () => {
     outExtensions: () => ({ js: '.mjs' }),
     logLevel: 'silent',
   });
-  ({ parseRunOutcome } = await import(pathToFileURL(join(outputDirectory, 'payload.mjs')).href));
   ({ parseAppManifest } = await import(pathToFileURL(join(outputDirectory, 'appConfig.mjs')).href));
   ({ ResultFooter } = await import(pathToFileURL(join(outputDirectory, 'ResultFooter.mjs')).href));
   ({ ResultGrid } = await import(pathToFileURL(join(outputDirectory, 'ResultGrid.mjs')).href));
@@ -247,26 +245,6 @@ test('failed run displays the actual task error ahead of the generic Job status'
   );
   assert.match(html, /ValueError: Guardrails failed the workflow/);
   assert.doesNotMatch(html, /Task compute_operator failed/);
-});
-
-test('optional execution metadata preserves valid fields and ignores malformed values', () => {
-  const base = { version: 8, appName: 'Branch outputs', blocks: ENVIRONMENT_BLOCKS, parameters: [] };
-  for (const disabled of [true, false]) {
-    const parsed = parseAppManifest({
-      ...base,
-      blocks: [{ ...ENVIRONMENT_BLOCKS[0], disabled, parentGroupId: 'group_prod' }],
-    });
-    assert.equal(parsed.blocks[0].disabled, disabled);
-    assert.equal(parsed.blocks[0].parentGroupId, 'group_prod');
-  }
-  for (const disabled of [undefined, null, 'true', 'false', 0, 1, {}, []]) {
-    const parsed = parseAppManifest({ ...base, blocks: [{ ...ENVIRONMENT_BLOCKS[0], disabled }] });
-    assert.deepEqual(parsed.blocks, [ENVIRONMENT_BLOCKS[0]]);
-  }
-  for (const parentGroupId of [undefined, null, '', true, false, 0, 1, {}, []]) {
-    const parsed = parseAppManifest({ ...base, blocks: [{ ...ENVIRONMENT_BLOCKS[0], parentGroupId }] });
-    assert.deepEqual(parsed.blocks, [ENVIRONMENT_BLOCKS[0]]);
-  }
 });
 
 test('initial placeholders remain visible without recorded runtime state', () => {
@@ -966,20 +944,4 @@ test('missing client metadata does not imply completeness or break rendering', (
   assert.equal(payload.truncated, null);
   assert.equal(payload.total_row_count, undefined);
   assert.match(footer(payload), /10 returned rows/);
-});
-
-test('manifest retains HTML without a port and discards contradictory output declarations', () => {
-  const manifest = parseAppManifest({
-    version: 8,
-    appName: 'HTML app',
-    parameters: [],
-    blocks: [
-      HTML_BLOCK,
-      { ...HTML_BLOCK, id: 'bad', port: 'data' },
-      { type: 'output', id: 'no-port', nodeId: 'source' },
-    ],
-  });
-  assert.equal(manifest.blocks.length, 1);
-  assert.equal(manifest.blocks[0].kind, 'html');
-  assert.equal(manifest.blocks[0].port, undefined);
 });
