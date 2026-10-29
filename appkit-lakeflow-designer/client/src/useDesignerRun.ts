@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { UPLOAD_UNAVAILABLE, errorMessage, idString, isRecord } from '@databricks/appkit/beta/designer';
+import { UPLOAD_UNAVAILABLE, errorMessage, idString, isRecord } from '../../server/plugins/designer/client';
 import { parseRunSnapshot, type RunSnapshot } from './payload';
 import { RUN_ROUTE, runStatusRoute } from './routes';
 import { UploadUnavailableError } from './fileUpload';

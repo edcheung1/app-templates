@@ -1,4 +1,4 @@
-import type { AppMarkdownBlock } from '@databricks/appkit/beta/designer';
+import type { AppMarkdownBlock } from '../../server/plugins/designer/client';
 import type { LiHTMLAttributes } from 'react';
 import type { Root } from 'hast';
 import type { Components, Options } from 'react-markdown';

@@ -3,7 +3,7 @@ import type {
   AppManifestBlock,
   AppMarkdownBlock,
   AppOutputBlock,
-} from '@databricks/appkit/beta/designer';
+} from '../../server/plugins/designer/client';
 import type { LastRunState, LastRunSummary } from './lastRun';
 import type { RunHistoryEntry, SelectedRunState } from './runHistory';
 import type { MatchedOutput, RunOutcome, RunSnapshot } from './payload';

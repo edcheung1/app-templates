@@ -4,7 +4,7 @@ import {
   isValidMultiselectValue,
   errorMessage,
   isRecord,
-} from '@databricks/appkit/beta/designer';
+} from '../../server/plugins/designer/client';
 import { CONFIG_ROUTE } from './routes';
 
 export type NotRunnableReason = 'noManifest' | 'noJob' | 'updating';

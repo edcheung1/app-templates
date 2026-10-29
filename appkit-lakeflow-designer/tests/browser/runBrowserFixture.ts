@@ -8,7 +8,7 @@ import type { TestContext } from 'node:test';
 
 import react from '@vitejs/plugin-react';
 import { createServer } from 'vite';
-import { isRecord } from '@databricks/appkit/beta/designer';
+import { isRecord } from '../../server/plugins/designer/client.ts';
 
 interface BrowserCheckResult {
   completed: boolean;

@@ -11,7 +11,7 @@ import {
   type AppParameter,
   UPLOAD_REFERENCE,
   APP_UPDATING_MESSAGE,
-} from '@databricks/appkit/beta/designer';
+} from '../../server/plugins/designer/client';
 import { ActiveRunBanner } from './ActiveRunBanner';
 import { GuardrailSummary } from './GuardrailSummary';
 import {

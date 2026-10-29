@@ -5,7 +5,7 @@ import {
   UPLOAD_UNAVAILABLE,
   validateFileFormat,
   isRecord,
-} from '@databricks/appkit/beta/designer';
+} from '../../server/plugins/designer/client';
 import { uploadsRoute } from './routes';
 
 interface UploadChoice {

@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { after, before, mock, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'tsdown';
-import * as config from '@databricks/appkit/beta/designer';
-import * as fileFormats from '@databricks/appkit/beta/designer';
+import * as config from '../server/plugins/designer/client.ts';
+import * as fileFormats from '../server/plugins/designer/client.ts';
 
 let appConfig, fileUpload, outputDirectory;
 

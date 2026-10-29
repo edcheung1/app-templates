@@ -11,7 +11,7 @@ import {
 } from '@databricks/appkit-ui/react';
 import { useEffect, useId, useRef, useState, type FormEvent, type SetStateAction } from 'react';
 
-import { type AppParameter, parseMultiselectValue, toggleMultiselectValue } from '@databricks/appkit/beta/designer';
+import { type AppParameter, parseMultiselectValue, toggleMultiselectValue } from '../../server/plugins/designer/client';
 import { ComboboxParameterControl } from './ComboboxParameterControl';
 import { FileParameterControl } from './FileParameterControl';
 import { createFileUploadCache, UploadUnavailableError, validateUpload } from './fileUpload';

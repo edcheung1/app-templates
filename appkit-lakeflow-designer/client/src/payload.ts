@@ -15,7 +15,7 @@ import {
   stringValues,
   parseRunDiagnostics,
   type RunDiagnostics,
-} from '@databricks/appkit/beta/designer';
+} from '../../server/plugins/designer/client';
 
 export type SchemaField = {
   name: string;

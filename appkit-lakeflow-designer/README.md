@@ -1,6 +1,6 @@
 # appkit-lakeflow-designer
 
-The published Lakeflow Designer app: a Vite + React client and AppKit's beta `designer()` server
+The published Lakeflow Designer app: a Vite + React client and the registry's `designer()` server
 plugin. One Databricks App is deployed in the selected App Space for each published Designer App document.
 Publishing snapshots this template from a pinned commit in a workspace Git folder.
 
@@ -77,11 +77,13 @@ run search follows those cursors automatically.
 
 ## Layout
 
-- `server/server.ts` — registers AppKit's `server()` and beta `designer()` plugins. Type-checked
+- `server/server.ts` — registers AppKit's `server()` and the local `designer()` plugin. Type-checked
   and bundled by `build:server` (`tsc -b` + `tsdown`) to `dist/server.js`.
-- `@databricks/appkit/beta/designer` — browser-safe manifest schemas, types, and shared helpers.
+- `server/plugins/designer/` — installed source from [appkit-registry](https://github.com/databricks/appkit-registry/tree/main/registry/designer).
   The plugin owns manifest loading, Job orchestration, output decoding, authorization, and file
-  transfers. Those implementations and their backend regression tests live in AppKit.
+  transfers. Its backend regression tests live in the registry repository.
+- `server/plugins/designer/client.ts` — browser-safe manifest schemas, types, and shared helpers.
+  Client code imports this barrel; the server entry must stay out of browser bundles.
 - `client/` — the React client, built by Vite to `client/dist`.
 - `app.yaml` — start command and env bindings (`command: ['pnpm', 'run', 'start']`).
 - `tsconfig.shared.json` / `tsconfig.server.json` / `tsconfig.client.json` — a strict shared base
@@ -91,18 +93,28 @@ run search follows those cursors automatically.
   other build/test tools are under `devDependencies`. Install development dependencies before
   building, even when the resulting server will run with `NODE_ENV=production`.
 
-## AppKit release dependency
+## Updating the Designer plugin
 
-This migration depends on [AppKit PR 696](https://github.com/databricks/appkit/pull/696).
-The checked-in 0.89.0 SDK does not include `designer()` or its browser contract entry point.
-Keep this change in draft until a release containing that PR is available, then update the exact
-AppKit dependency and pnpm lockfile before merging. Merging the AppKit PR alone is insufficient.
+The template includes the source installed by `appkit add designer` and works with the released
+AppKit 0.89.0 packages. It does not depend on an unreleased SDK plugin or local package link.
+The installed source matches [registry commit `a0cb0f9`](https://github.com/edcheung1/appkit-registry/commit/a0cb0f921677b09b277b2fd619f0a40bafb22f59).
+The registry item is unverified until reviewed by an AppKit maintainer.
 
-For validation before release, build and pack the SDK from that PR and install the tarball in a
-local copy of this template. Follow the [AppKit plugin guide's packaged-integration instructions](https://github.com/edcheung1/appkit/blob/edcheung1/designer-plugin/docs/docs/plugins/designer.md).
-Do not commit a local link, tarball, or guessed release version. After the dependency update,
-advance the Designer publisher's template revision and redeploy Apps that should use the plugin.
-The API remains `/api/designer` and the manifest remains v8; no codegen change is required.
+After a registry change lands, update the template from this directory:
+
+```bash
+pnpm exec appkit add designer --force --no-register --no-resources --allow-unverified
+```
+
+Inspect the source before using `--allow-unverified`. The command copies the plugin, installs its
+declared dependencies, and synchronizes `appkit.plugins.json`. Review and commit the source and
+lockfile together, then run the checks below. During development, edits to the installed source
+work with `pnpm dev`; move those changes back to the registry and rebuild its item before merging.
+
+Publishing uses the plugin files already committed in the pinned template revision. It does not
+fetch the registry or execute `appkit add`. To roll out a plugin change, advance the publisher's
+template revision and republish Apps. The API remains `/api/designer` and the manifest remains v8;
+no publishing or codegen change is required for this refactor.
 
 ## Local development and validation
 

@@ -5,7 +5,7 @@ import {
   nonEmptyString,
   positiveInt,
   stringValues,
-} from '@databricks/appkit/beta/designer';
+} from '../../server/plugins/designer/client';
 import type { RunOutcome, RunSnapshot } from './payload';
 import { parseRunSnapshot } from './payload';
 import { runHistoryRoute, runStatusRoute } from './routes';

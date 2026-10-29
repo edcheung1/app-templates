@@ -1,4 +1,4 @@
-import { type AppParameter, UPLOAD_REFERENCE } from '@databricks/appkit/beta/designer';
+import { type AppParameter, UPLOAD_REFERENCE } from '../../server/plugins/designer/client';
 import { relative } from './relativeTime';
 import { useNow } from './useNow';
 import { Badge } from '@databricks/appkit-ui/react';

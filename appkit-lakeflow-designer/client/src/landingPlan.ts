@@ -1,4 +1,4 @@
-import { idString } from '@databricks/appkit/beta/designer';
+import { idString } from '../../server/plugins/designer/client';
 
 export type ConsumerRunPhase = 'idle' | 'running' | 'settled';
 

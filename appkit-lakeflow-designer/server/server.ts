@@ -1,4 +1,4 @@
 import { createApp, server } from '@databricks/appkit';
-import { designer } from '@databricks/appkit/beta';
+import { designer } from './plugins/designer';
 
-await createApp({ plugins: [server(), designer()] });
+await createApp({ plugins: [designer(), server()] });

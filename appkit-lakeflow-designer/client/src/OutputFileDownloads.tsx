@@ -1,4 +1,4 @@
-import { fileDownloadRoute, type WrittenFile } from '@databricks/appkit/beta/designer';
+import { fileDownloadRoute, type WrittenFile } from '../../server/plugins/designer/client';
 import { useState } from 'react';
 import {
   Button,

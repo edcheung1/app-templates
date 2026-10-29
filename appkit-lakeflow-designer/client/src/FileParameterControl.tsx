@@ -1,4 +1,4 @@
-import { uploadAccept } from '@databricks/appkit/beta/designer';
+import { uploadAccept } from '../../server/plugins/designer/client';
 import { useRef, useState, type DragEvent } from 'react';
 import { Button, cn, formatFileSize, Input } from '@databricks/appkit-ui/react';
 

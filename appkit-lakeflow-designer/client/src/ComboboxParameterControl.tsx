@@ -9,7 +9,7 @@ import {
 } from '@databricks/appkit-ui/react';
 import { useEffect, useId, useRef, useState } from 'react';
 
-import type { AppParameter } from '@databricks/appkit/beta/designer';
+import type { AppParameter } from '../../server/plugins/designer/client';
 import { parameterLabel } from './parameterLabels';
 
 export function ComboboxParameterControl({
