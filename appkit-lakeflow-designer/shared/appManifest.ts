@@ -124,6 +124,8 @@ export const appManifestSchema = z.pipe(
   z.object({
     version: z.literal(8),
     runner: z.optional(runnerSchema),
+    // Notebook runners bind output blocks to cell nuids instead of Designer display(ctx[...]) lines.
+    runnerKind: z.optional(z.literal('notebook')),
     appName: nonEmptyString,
     subtitle: z.optional(z.unknown()),
     provenance: z.optional(z.unknown()),
@@ -158,6 +160,7 @@ export const appManifestSchema = z.pipe(
     return {
       ...(storage === undefined ? {} : { storage }),
       ...(raw.runner === undefined ? {} : { runner: raw.runner }),
+      ...(raw.runnerKind === undefined ? {} : { runnerKind: raw.runnerKind }),
       version: raw.version,
       appName: raw.appName,
       ...(typeof raw.subtitle === 'string' && raw.subtitle !== '' ? { subtitle: raw.subtitle } : {}),

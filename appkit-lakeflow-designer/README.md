@@ -1,10 +1,12 @@
 # appkit-lakeflow-designer
 
 The published Lakeflow Designer app: a Vite + React client and a Node/AppKit server. One published
-Databricks App is deployed in the selected App Space for each published Designer App document.
+Databricks App is deployed in the selected App Space for each published App document, whether it was
+authored in a Designer file or in a notebook (see [Runner kinds](#runner-kinds)).
 Publishing snapshots this template from a pinned commit in a workspace Git folder.
 
-This template is provisioned through **Publish App in Lakeflow Designer**. It requires the
+This template is provisioned through **Publish app** in Lakeflow Designer or in a notebook's
+**Apps** menu. It requires the
 matching published runner Job and `designerApp.json`; binding an arbitrary Job is not sufficient.
 It intentionally has no catalog `manifest.yaml`, because the generic Create App wizard cannot
 prepare those Designer artifacts. `databricks.yml` is for testing an existing publication.
@@ -18,6 +20,20 @@ Per-app differences are injected at deploy time rather than baked into the sourc
 - **Manifest** (`designerApp.json`, which operators/parameters/markdown to render) — written by the
   publish flow beside the runner notebook in its publisher-owned workspace folder. The server
   derives that folder from the bound job's notebook path; no shared manifest root is needed.
+
+## Runner kinds
+
+The manifest's optional `runnerKind` selects how the server binds run results to output blocks.
+Everything else (run submission, attribution, history, parameters and rendering) is shared.
+
+- **Designer** (no `runnerKind`): the runner is the generated `runner-<revision>.designer.py`, and an
+  output block binds to the operator output its `display(ctx["node.port"])` line shows.
+- **Notebook** (`"runnerKind": "notebook"`, experimental): publishes an ordinary notebook. Its runner is
+  an immutable JUPYTER copy at `runner-<revision>` (no extension) with a revision guard prepended as the
+  first cell. Output blocks bind to the authored cell's `nuid`, which survives the copy and the job
+  run: `port: "table-N"` selects the cell's Nth table, and `kind: "html"` renders the cell's other
+  results (HTML, images, printed text) as one sandboxed page. Unselected cells stay private. Notebook
+  runners have no row-count, runtime-disablement or file-receipt metadata.
 
 ## Run attribution and usage reporting
 

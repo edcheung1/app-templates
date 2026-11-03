@@ -9,7 +9,18 @@ export interface PublishedRunner {
   parameters: Record<string, string>;
 }
 
-export function isPublishedRunner(runner: PublishedRunner | undefined, job: unknown): boolean {
+export type RunnerKind = 'notebook';
+
+// Designer runners are Designer files; notebook runners are immutable notebook copies without an extension.
+function runnerPathSuffix(revision: string, kind: RunnerKind | undefined): string {
+  return kind === 'notebook' ? `/runner-${revision}` : `/runner-${revision}.designer.py`;
+}
+
+export function isPublishedRunner(
+  runner: PublishedRunner | undefined,
+  job: unknown,
+  kind?: RunnerKind
+): boolean {
   if (!runner || !isRecord(job) || !isRecord(job.settings) || !Array.isArray(job.settings.tasks)) return false;
   if (job.settings.tasks.length !== 1) return false;
   const task: unknown = job.settings.tasks[0];
@@ -18,7 +29,7 @@ export function isPublishedRunner(runner: PublishedRunner | undefined, job: unkn
   const parameters = notebook.base_parameters;
   return (
     typeof notebook.notebook_path === 'string' &&
-    notebook.notebook_path.endsWith(`/runner-${runner.revision}.designer.py`) &&
+    notebook.notebook_path.endsWith(runnerPathSuffix(runner.revision, kind)) &&
     isRecord(parameters) &&
     Object.keys(parameters).length === Object.keys(runner.parameters).length &&
     Object.entries(runner.parameters).every(([name, value]) => parameters[name] === value)

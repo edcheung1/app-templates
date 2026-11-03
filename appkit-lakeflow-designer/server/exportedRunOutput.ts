@@ -216,8 +216,112 @@ function htmlOutputs(source: unknown, results: unknown): Record<string, unknown>
   return [{ ...binding, status: 'ok', html: entries[0] }];
 }
 
+export const NOTEBOOK_TABLE_PORT_PREFIX = 'table-';
+const NOTEBOOK_ERROR_RESULT_TYPES: ReadonlySet<string> = new Set(['error', 'ipynbError', 'sqlError', 'baseError']);
+const NOTEBOOK_IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif'];
+const ANSI_ESCAPE_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*[A-Za-z]`, 'g');
+const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+const preformatted = (text: string) =>
+  `<pre style="white-space: pre-wrap; margin: 0">${text
+    .replace(ANSI_ESCAPE_SEQUENCE, '')
+    .replace(/[&<>"']/g, (char) => HTML_ESCAPES[char])}</pre>`;
+
+function notebookResultEntries(results: unknown): unknown[] {
+  return isRecord(results) && results.type === 'raw' ? [results] : resultEntries(results);
+}
+
+// Non-tabular notebook results (HTML, images, printed text) render through the sandboxed HTML frame.
+function notebookRichFragment(entry: unknown): string | undefined {
+  if (!isRecord(entry)) return undefined;
+  if (entry.type === 'mimeBundle' && isRecord(entry.data)) {
+    const html = entry.data['text/html'];
+    if (typeof html === 'string') return html;
+    for (const mime of NOTEBOOK_IMAGE_MIME_TYPES) {
+      const image = entry.data[mime];
+      if (typeof image === 'string') return `<img alt="" style="max-width: 100%" src="data:${mime};base64,${image}">`;
+    }
+    const text = entry.data['text/plain'];
+    return typeof text === 'string' ? preformatted(text) : undefined;
+  }
+  if ((entry.type === 'htmlSandbox' || entry.type === 'html') && typeof entry.data === 'string') return entry.data;
+  if ((entry.type === 'ansi' || entry.type === 'raw' || entry.type === 'text') && typeof entry.data === 'string') {
+    return preformatted(entry.data);
+  }
+  return undefined;
+}
+
+function notebookCellError(command: Record<string, unknown>): { type: string; message: string } | undefined {
+  const results = command.results;
+  const failed =
+    command.state === 'error' ||
+    (isRecord(results) && typeof results.type === 'string' && NOTEBOOK_ERROR_RESULT_TYPES.has(results.type));
+  if (!failed) return undefined;
+  const summary = typeof command.errorSummary === 'string' ? command.errorSummary : '';
+  const message = summary.replace(/<[^>]*>/g, '').replace(ANSI_ESCAPE_SEQUENCE, '').trim();
+  return { type: 'NotebookCellError', message: message || 'This notebook cell failed.' };
+}
+
+// A notebook cell is bound by its nuid, which survives the JUPYTER runner copy and the job run.
+// Its Nth table is port `table-N`; its other results form one HTML page (`kind: 'html'`).
+function notebookCellOutputs(command: Record<string, unknown>): Record<string, unknown>[] {
+  const nuid = typeof command.nuid === 'string' && command.nuid !== '' ? command.nuid : undefined;
+  // Visualization subcommands repeat their parent's results and are not author cells.
+  if (nuid === undefined || (Array.isArray(command.parentHierarchy) && command.parentHierarchy.length > 0)) return [];
+  const failure = notebookCellError(command);
+  if (failure !== undefined) {
+    return [
+      { status: 'error', kind: 'html', target_node: nuid, error: failure },
+      { status: 'error', target_node: nuid, target_port: `${NOTEBOOK_TABLE_PORT_PREFIX}0`, error: failure },
+    ];
+  }
+  const outputs: Record<string, unknown>[] = [];
+  const fragments: string[] = [];
+  let tableIndex = 0;
+  for (const entry of notebookResultEntries(command.results)) {
+    const table = toDisplayTable(entry);
+    if (table !== undefined) {
+      outputs.push({
+        status: 'ok',
+        target_node: nuid,
+        target_port: `${NOTEBOOK_TABLE_PORT_PREFIX}${tableIndex}`,
+        ...table,
+      });
+      tableIndex += 1;
+      continue;
+    }
+    const fragment = notebookRichFragment(entry);
+    if (fragment !== undefined) fragments.push(fragment);
+  }
+  if (fragments.length > 0) {
+    const html = fragments.join('\n');
+    outputs.push(
+      isHtmlOutput(html)
+        ? { status: 'ok', kind: 'html', target_node: nuid, html }
+        : {
+            status: 'error',
+            kind: 'html',
+            target_node: nuid,
+            error: {
+              type: 'HtmlOutputError',
+              message: 'The cell output exceeds the 4,194,304-character limit. Reduce its size and run again.',
+            },
+          }
+    );
+  }
+  return outputs;
+}
+
+export interface ExportedRunOptions {
+  runnerKind?: 'notebook';
+}
+
 // MIME metadata must not consume a table ordinal when pairing results with display calls.
-export function exportedModelToRunPayload(exportedHtml: unknown, taskErrorTexts: string[] = []): string | undefined {
+export function exportedModelToRunPayload(
+  exportedHtml: unknown,
+  taskErrorTexts: string[] = [],
+  { runnerKind }: ExportedRunOptions = {}
+): string | undefined {
   const model = decodeNotebookModel(exportedHtml);
   if ((model === undefined || !Array.isArray(model.commands)) && taskErrorTexts.length === 0) {
     return undefined;
@@ -229,6 +333,10 @@ export function exportedModelToRunPayload(exportedHtml: unknown, taskErrorTexts:
   const commands = Array.isArray(model?.commands) ? model.commands : [];
   for (const command of commands) {
     if (!isRecord(command)) {
+      continue;
+    }
+    if (runnerKind === 'notebook') {
+      outputs.push(...notebookCellOutputs(command));
       continue;
     }
     outputs.push(...htmlOutputs(command.command, command.results));

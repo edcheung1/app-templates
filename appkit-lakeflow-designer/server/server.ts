@@ -252,19 +252,26 @@ async function readCompletedTaskOutput(taskRunId: string, failed = false): Promi
   const value = Promise.allSettled([
     readRunExport(taskRunId),
     failed ? retryRead(() => wsClient().jobs.getRunOutput({ runId: BigInt(taskRunId) })) : Promise.resolve(undefined),
-  ]).then(([exported, taskOutput]) => {
+    loadManifest(),
+  ]).then(([exported, taskOutput, manifest]) => {
     const taskError = taskOutput.status === 'fulfilled' ? taskOutput.value : undefined;
     const taskErrorTexts = [taskError?.error, taskError?.errorTrace].filter(
       (text): text is string => typeof text === 'string'
     );
     const html = exported.status === 'fulfilled' ? exported.value : undefined;
+    const runnerKind = manifest.status === 'fulfilled' ? manifest.value?.runnerKind : undefined;
     // Retention gaps and transient read errors can recover; do not retain them for the full cache TTL.
-    if (exported.status === 'rejected' || taskOutput.status === 'rejected' || html === undefined) {
+    if (
+      exported.status === 'rejected' ||
+      taskOutput.status === 'rejected' ||
+      manifest.status === 'rejected' ||
+      html === undefined
+    ) {
       const entry = completedTaskOutputs.get(key);
       if (entry?.value === value) entry.expiresAt = Date.now() + 5000;
     }
     return {
-      payload: exportedModelToRunPayload(html, taskErrorTexts),
+      payload: exportedModelToRunPayload(html, taskErrorTexts, { runnerKind }),
       failureReason: nonEmptyString(taskError?.error) ?? nonEmptyString(taskError?.errorTrace),
       ...(exported.status === 'rejected' ? { readError: errorMessage(exported.reason) } : {}),
     };
@@ -507,7 +514,7 @@ await createApp({
             res.json({ manifest: publicManifest, runnable: false, notRunnableReason: 'noJob' });
             return;
           }
-          const runnable = isPublishedRunner(manifest.runner, await readJob());
+          const runnable = isPublishedRunner(manifest.runner, await readJob(), manifest.runnerKind);
           res.json({ manifest: publicManifest, runnable, ...(runnable ? {} : { notRunnableReason: 'updating' }) });
         } catch (err) {
           console.error(err);
@@ -604,7 +611,7 @@ await createApp({
             res.status(409).json({ error: 'This app has no runtime App ID, so it cannot attribute Job runs.' });
             return;
           }
-          if (!isPublishedRunner(manifest.runner, await readJob())) {
+          if (!isPublishedRunner(manifest.runner, await readJob(), manifest.runnerKind)) {
             res.status(409).json({ error: APP_UPDATING_MESSAGE });
             return;
           }
